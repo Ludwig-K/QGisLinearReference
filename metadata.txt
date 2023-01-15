@@ -1,0 +1,20 @@
+[general]
+name=LinearReferencing
+description=Tools für linear referenzierte Layer: point-on-line/line-on-line
+about=Tools für linear referenzierte Layer: point-on-line/line-on-line: Dialog, which shows current cursor-position measured on a line-theme.
+version=1.0
+qgisMinimumVersion=3.0
+author=Ludwig Kniprath
+email=ludwig@kni-online.de
+
+tracker=https://github.com/Ludwig-K/QGisLinearReference/issues
+repository=https://github.com/Ludwig-K/QGisLinearReference
+
+# Tags are comma separated with spaces allowed
+tags=python,linear reference, Event-Themes
+
+homepage=https://github.com/Ludwig-K/QGisLinearReference/edit/main/README.md
+category=Plugins
+icon=icons/linear_referencing.svg
+experimental=False
+deprecated=False
