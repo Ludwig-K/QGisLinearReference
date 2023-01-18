@@ -1,7 +1,7 @@
 # QGisLinearReference
-QGis-Python-Plugin for linear referenced data(point-on-line/line_on_line-Layers)
+QGis-Python-Plugin for linear referenced data (point-on-line/line_on_line)
 
-Enables the user to create a virtual layer with geometries defined by the reference to a line-vector and *one* (point_on_line) or *two* measures (from...to) on that line and an optional offset (line_on_line).
+Enables the user to create virtual layers with geometries defined by the reference to a line-vector and *one* (point_on_line) or *two* measures (from...to) on that line and an optional offset (line_on_line).
 
 The original purpose were "events" along rivers, e. g. care measures on the riverbanks.
 
@@ -15,8 +15,8 @@ And any number of additional fields in the data-table for the necessary data of 
 
 The resulting layers are 'memory layer' which you can export to different vector formats.
 
-You can also manually update the features of an existing data-table with virtual Layer or define a target-data-table via plugin
+You can also manually update the features of an existing data-table (with virtual Layer) or define a target-data-table via plugin and append new or update existing features.
 
-You can also use the plugin just to visiualize the position of points/line-segments along a line.
+You can also use the plugin without creating memory tables/virtual layers just to visiualize the position of points/line-segments along a line.
 
 This is my first plugin for QGis, so please be patient and report bugs, ideas for missing features or translation-errors. 

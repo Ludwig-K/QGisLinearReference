@@ -12,11 +12,15 @@
 import os
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QAction
-from PyQt5.QtCore import QSettings
+from PyQt5.QtCore import QSettings, QUrl, pyqtSlot, QVariant
 
 from PyQt5.QtCore import QTranslator, QCoreApplication, QLocale
+from qgis.core import QgsProject
 
-from .MyMapTools import DigitizeLineEvent
+from .DigitizeLineEvent import DigitizeLineEvent
+from .DigitizePointEvent import DigitizePointEvent
+from .MyToolFunctions import get_linestring_layers
+
 
 class LinearReferencePlugin:
     '''Container-Objekt mit den Hauptfunktionen des Plugins, wird in __init__.py von classFactory() zurückgeliefert '''
@@ -32,34 +36,8 @@ class LinearReferencePlugin:
         self.map_tools = {}
         self.actions = {}
 
-        # Grundeinstellung aller Texte/Meldungen... "en_US", Übersetzungsdatei aber nur für "de"
-        # die Übersetzungsdateien selbst werden via Qt Linguist aus dem Quellcode exrahiert (=> *.ts) und kompiliert (=> *.qm)
-        # https://doc.qt.io/qt-5/qtlinguist-index.html
-        # Creating Translation Files (*.ts) => Kommandozeilentool lupdate
-        # der Aufruf generiert keine neue ts-Datei, sondern ergänzt diese mit neuen Treffern, z. B. aus neuen oder geänderten Quellcode-Dateien
-        # Special bei Python:
-        # lupdate sucht in den Quellcode-Dateien nach Qt-Objekt-Aufrufen der tr()-Funktion als my_qt_object.tr('...','...'), meckert dann aber "tr() cannot be called without context"
-        # Workaround:
-        # 1. Verwendung der statischen Variante QCoreApplication.translate("Quark", "Lorem ipsum...")
-        # 2. eine eigene tr()-Funktion definieren, diese muss aber dem lupdate mit dem Parameter -tr-function-alias QT_TRANSLATE_NOOP=... mitgeteilt werden
-        # lupdate Quellcode.py -tr-function-alias QT_TRANSLATE_NOOP=mein_tr -ts dictionary_de.ts
-        # soll der Name der eigenen Funktion ebenfalls tr lauten:
-        # lupdate Quellcode.py -tr-function-alias tr=weg_damit,QT_TRANSLATE_NOOP=tr -ts dictionary_de.ts
-        # mehrere Dateien via Erweiterung:
-        # lupdate -extensions py,ui Scan-verzeichnis -tr-function-alias tr=weg_damit,QT_TRANSLATE_NOOP=tr -ts dictionary_de.ts
-        # hier z. B.:
-        # cd
-        # lupdate -extensions py /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/ -tr-function-alias tr=weg_damit,QT_TRANSLATE_NOOP=tr -ts /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/i18n/LinearReferencing_de.ts
-        # -recursive => rekursives scannen (default)
-        # -no-recursive => nur im aktuellen Verzeichnis
-        # -target-language de_DE => wird aber automatisch erkannt
-        # -extensions py => als erster Parameter gefolgt vom absoluten Verzeichnispfad
-        # -silent => keine Fehlermeldung, z. B. werden mehrzeilige '''-Strings mit "Unterminated C++ string" bemäkelt, tut es nicht bei -extension
-        # -no-obsolete => die in einer evtl. bereits vorhandenen ls-Datei nicht mehr verwendeten Einträge entfernen
-        # Vorbedingung für Verwendung von pro-Dateien (deprecated): sudo apt-get install qt5-qmake
-
-        # Spracheinstellung rausfinden und Übersetzungsdatei laden
-        # geklaut bei "Plugin-Reloader"
+        # Grundeinstellung aller Texte/Meldungen... "en_US", Übersetzungsdatei für "de" und "fr"
+        # Spracheinstellung rausfinden
         if QSettings().value('locale/overrideFlag', type=bool):
             # locale in QGis-Settings abweichend vom System definiert?
             locale = QSettings().value('locale/userLocale')
@@ -67,11 +45,9 @@ class LinearReferencePlugin:
             # andernfalls Systemeinstellung
             locale = QLocale.system().name()
 
-        # dynamischer Pfad zu einer Übersetzungsdatei, die nicht vorhanden sein muss, da nicht alle Sprachmöglichkeiten abgedeckt werden können
-        # verwendet aber nur die ersten beiden Zeichen von locale, also wird aus 'de_DE' ein 'de',
-        # um auch Österreich de_AT, Schweiz de_CH, Belgien de_BE, Liechtenstein de_LI ... zu bedienen
+        # passende Übersetzungsdatei laden
+        # verwendet nur die ersten beiden Zeichen von locale, 'de_DE' 'de_AT' 'de_CH' 'de_BE' 'de_LI' => 'de',
         ts_path = os.path.join(os.path.dirname(__file__), 'i18n', 'LinearReferencing_{}.qm'.format(locale[0:2]))
-        print(ts_path)
         if os.path.exists(ts_path):
             # als Objekteigenschaft speichern
             self.translator = QTranslator()
@@ -79,12 +55,14 @@ class LinearReferencePlugin:
             if load_result:
                 QCoreApplication.installTranslator(self.translator)
             else:
-                #raise Exception("Translator-Datei '{}' nicht geladen...".format(ts_path))
+                # raise Exception("Translator-Datei '{}' nicht geladen...".format(ts_path))
                 pass
         else:
-            #raise Exception("Translator-Datei '{}' nicht vorhanden...".format(ts_path))
+            # raise Exception("Translator-Datei '{}' nicht vorhanden...".format(ts_path))
             pass
 
+        QgsProject.instance().layersAdded.connect(self.slot_refresh_dialogs)
+        QgsProject.instance().layersRemoved.connect(self.slot_refresh_dialogs)
 
     def tr(self, message: str) -> str:
         '''innerhalb von Qt liefert QObject.tr() die Übersetzung
@@ -100,17 +78,34 @@ class LinearReferencePlugin:
         '''Anpassung des GUI, Standardfunktion eines Plugins'''
         self.actions['DigitizeLineEvent'] = QAction(
             QIcon(os.path.join(os.path.dirname(__file__), 'icons/linear_referencing.svg')),
-            'LinearReferencing',
+            self.tr('digitize line_on_line-events'),
             self.iface.mainWindow())
-
         self.actions['DigitizeLineEvent'].setCheckable(True)
-
         self.actions['DigitizeLineEvent'].triggered.connect(lambda: self.set_map_tool('DigitizeLineEvent'))
-
         # Toolbar-Icoon für diese action
         self.iface.addToolBarIcon(self.actions['DigitizeLineEvent'])
         # und Menüeintrag
         self.iface.addPluginToMenu('LinearReferencing', self.actions['DigitizeLineEvent'])
+
+        self.actions['DigitizePointEvent'] = QAction(
+            QIcon(os.path.join(os.path.dirname(__file__), 'icons/linear_referencing_point.svg')),
+            self.tr('digitize point_on_line-events'),
+            self.iface.mainWindow())
+        self.actions['DigitizePointEvent'].setCheckable(True)
+        self.actions['DigitizePointEvent'].triggered.connect(lambda: self.set_map_tool('DigitizePointEvent'))
+        # Toolbar-Icoon für diese action
+        self.iface.addToolBarIcon(self.actions['DigitizePointEvent'])
+        # und Menüeintrag
+        self.iface.addPluginToMenu('LinearReferencing', self.actions['DigitizePointEvent'])
+
+        self.actions['ShowHelp'] = QAction(
+            QIcon(os.path.join(os.path.dirname(__file__), 'icons/account-question-outline.svg')),
+            self.tr('Show Help'),
+            self.iface.mainWindow())
+
+        self.actions['ShowHelp'].triggered.connect(self.show_help)
+
+        self.iface.addPluginToMenu('LinearReferencing', self.actions['ShowHelp'])
 
         # Aufruf bei Wechsel des MapTools
         self.iface.mapCanvas().mapToolSet.connect(self.reset_tool)
@@ -130,41 +125,82 @@ class LinearReferencePlugin:
             self.map_tools[map_tool_key].unload()
             del self.map_tools[map_tool_key]
 
-    def set_map_tool(self, map_tool_key):
-        '''MapTool bei Bedarf generieren und setzen'''
+    def show_help(self):
+        '''lokale Hilfeseitec/docs/index.html öffnen'''
+        import webbrowser
+        url = QUrl.fromLocalFile(os.path.join(os.path.dirname(__file__), 'docs', 'index.html')).toString()
+        webbrowser.open(url, new=2)
 
-        # alle actions dieses Plugins (derzeit genau eines...) vorab deaktivieren
-        for key in self.actions:
-            self.actions[key].setChecked(False)
+    # @pyqtSlot mit irgendeiner Signatur funzt nicht, "TypeError: decorated slot has no signature compatible with layersAdded(QList)", geht aber auch ohne...
+    def slot_refresh_dialogs(self, layers):
+        '''registriert Zu/Abgänge bei den Layern und aktualisiert die Dialoge'''
+        linestring_layers = get_linestring_layers(self.iface)
+        if len(linestring_layers) < 1:
+            self.iface.messageBar().pushMessage(self.tr('LinearReferencing'),
+                                                self.tr("no suitable reference-layer (type linestring) found!")
+                                                )
+            for key in self.actions:
+                self.actions[key].setChecked(False)
 
-        if map_tool_key == 'DigitizeLineEvent':
-            # nur bei Erstaufruf neu anlegen, sonst das bereits initialisierte weiterverwenden
-            if map_tool_key in self.map_tools:
-                current_map_tool = self.map_tools[map_tool_key]
-            else:
-                current_map_tool = DigitizeLineEvent(self.iface)
+        for key in self.map_tools:
+            self.map_tools[key].refresh_qcb_reference_layer()
 
-            current_map_tool.dialogue.show()
-            current_map_tool.set_layer(self.iface.activeLayer())
+    def set_map_tool(self, map_tool_key: str) -> None:
+        '''MapTool bei Bedarf generieren und setzen
+        :param map_tool_key: das zu aktivierende map_tool dieses Plugins
+        '''
 
-            if current_map_tool.ref_line_layer is not None:
-                # setMapTool => Sets the map tool currently being used on the canvas
-                self.iface.mapCanvas().setMapTool(current_map_tool)
-                self.actions[map_tool_key].setChecked(True)
+        linestring_layers = get_linestring_layers(self.iface)
+        if len(linestring_layers) > 0:
 
-                # Referenz im Plugin-Objekt zur Konservierung (sonst ist das lokale current_map_tool nach Beendigung von set_map_tool nicht mehr vorhanden)
-                # und Wiederverwendung bei wiederholtem Aufruf
-                self.map_tools['DigitizeLineEvent'] = current_map_tool
+            # alle actions dieses Plugins (derzeit genau eines...) vorab deaktivieren
+            for key in self.actions:
+                self.actions[key].setChecked(False)
+
+            current_map_tool = None
+
+            if map_tool_key == 'DigitizePointEvent':
+
+                if 'DigitizePointEvent' in self.map_tools:
+                    current_map_tool = self.map_tools['DigitizePointEvent']
+                else:
+                    current_map_tool = DigitizePointEvent(self.iface)
+                    self.map_tools['DigitizePointEvent'] = current_map_tool
+
+                current_map_tool.refresh_qcb_reference_layer()
+                current_map_tool.dialogue.show()
+                current_map_tool.set_layer()
+
+                if current_map_tool.ref_line_layer is not None:
+                    # setMapTool => Sets the map tool currently being used on the canvas
+                    self.iface.mapCanvas().setMapTool(current_map_tool)
+                    self.actions[map_tool_key].setChecked(True)
+
+            elif map_tool_key == 'DigitizeLineEvent':
+
+                if 'DigitizeLineEvent' in self.map_tools:
+                    current_map_tool = self.map_tools['DigitizeLineEvent']
+                else:
+                    current_map_tool = DigitizeLineEvent(self.iface)
+                    self.map_tools['DigitizeLineEvent'] = current_map_tool
+
+                current_map_tool.refresh_qcb_reference_layer()
+                current_map_tool.dialogue.show()
+                current_map_tool.set_layer()
+
+                if current_map_tool.ref_line_layer is not None:
+                    # setMapTool => Sets the map tool currently being used on the canvas
+                    self.iface.mapCanvas().setMapTool(current_map_tool)
+
+                    self.actions[map_tool_key].setChecked(True)
+        else:
+            self.iface.messageBar().pushMessage(self.tr('LinearReferencing'),
+                                                self.tr("no suitable reference-layer (type linestring) found!")
+                                                )
+            for key in self.actions:
+                self.actions[key].setChecked(False)
 
     def reset_tool(self, new_tool, old_tool):
         '''das Deaktivieren des MapTool-Icons, wenn der vorherige MapTool 'DigitizeLineEvent' war'''
         for key in self.actions:
             self.actions[key].setChecked(False)
-
-        '''if type(old_tool).__name__ == 'DigitizeLineEvent':
-            try:
-                current_action = self.actions['DigitizeLineEvent']
-                # seltsamerweise unter Windows: AttributeError: 'LinearReferencing' object has no attribute 'action'
-                current_action.setChecked(False)
-            except:
-                pass'''

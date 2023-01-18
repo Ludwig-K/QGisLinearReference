@@ -10,7 +10,7 @@
     </message>
 </context>
 <context>
-    <name>LRefDockWidget</name>
+    <name>LineOnLineDialogue</name>
     <message>
         <location filename="../MyDialogs.py" line="47"/>
         <source>Linear Referencing</source>
