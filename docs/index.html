@@ -1,0 +1,382 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+    <head>
+        <meta http-equiv="content-type" content="text/html;
+      charset=windows-1252">
+        <link type='text/css' rel='stylesheet' href='./index.css' />
+        <title>QGis-Plugin "Linear Referencing"</title>
+    </head>
+    <body>
+        <div class="p_lvl_1">
+            <h1>QGis-Plugin "Linear Referencing"</h1>
+            <div class="p_lvl_2" id="toc">
+                <h2>Table of contents</h2>
+                <ul>
+                    <li><a href="#linear_referencing_principle">Linear-referencing principal</a></li>
+                    <li><a href="#pre_requisits">Pre-Requisites</a></li>
+                    <li><a href="#installation_and_run">Installation and run</a></li>
+                    <li><a href="#pol">PoL: Point-on-Line</a>
+                        <ul>
+                            <li><a href="#pol_measure">Measure</a></li>
+                            <li><a href="#pol_storage">Storage</a></li>
+                            <li><a href="#pol_feature_selection">Feature Selection</a></li>
+                            <li><a href="#pol_layers_and_fields">Layers and fields</a>
+                                <ul>
+                                    <li><a href="#pol_reference_layer">Reference-Layer</a></li>
+                                    <li><a href="#pol_data_layer">Data-Layer</a></li>
+                                    <li><a href="#pol_show_layer">Show-Layer</a></li>
+                                </ul>
+                            </li>
+                            <li><a href="#pol_styles">Styles</a></li>
+                            <li><a href="#pol_configurations">Store/Restore Configurations</a></li>
+                        </ul>
+                    </li>
+                    <li><a href="#lol">LoL: Line-on-Line-Features</a>
+                        <ul>
+                            <li><a href="#lol_measure">Measure</a></li>
+                            <li><a href="#lol_storage">Storage</a></li>
+                            <li><a href="#lol_feature_selection">Feature Selection</a>
+                            <li><a href="#lol_layers_and_fields">Layers and fields</a>
+                                <ul>
+                                    <li><a href="#lol_reference_layer">Reference-Layer</a></li>
+                                    <li><a href="#lol_data_layer">Data-Layer</a></li>
+                                    <li><a href="#lol_show_layer">Show-Layer</a></li>
+                                </ul>
+                            </li>
+                            <li><a href="#lol_styles">Styles</a></li>
+                            <li><a href="#lol_configurations">Store/Restore Configurations</a></li>
+                        </ul>
+                    </li>
+                    <li><a href="#attribute_tables">Attribute tables</a></li>
+                    <li><a href="#notes">Notes</a></li>
+                </ul>
+            </div>
+            <div class="p_lvl_2" id="linear_referencing_principle">
+                <h2>Linear-referencing principal</h2>
+                <b><i>"Linear referencing"</i></b> offers the possibility to define points via a reference line and
+                numerical stationing:
+                <div class="p_lvl_3">
+                    <h3>Point-on-Line</h3>
+                    (<i>"PoL"</i> in the further course)<br /> Point-features defined by reference to line-feature
+                    (1:n-relation to linestring-layer) and the distance to the start-point of that line
+
+                    <img class="sized_block_image" src="images/2023-05-29 linear_referencing_prinzip_pol.png" alt="Point-on-Line">
+                    <div class="block_image_label">
+                        <b>Point-on-Line-feature</b><br /> left-side: PoL-Dialog<br /> right side: attribute form with
+                        minimal necessary data for point-on-line-features:
+                        <ul>
+                            <li>Feature-Identifier (PK)</li>
+                            <li>Reference-Line-ID</li>
+                            <li>measure = distance to start-point of reference line<br /> (Note: Digitization direction
+                                as usual from mouth to source)
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="p_lvl_3">
+                    <h3>Line-on-Line</h3>
+                    <div class="notes"><i>"LoL"</i> in the further course</div>
+                    Line-segment-features defined by reference to line-feature (1:n-relation to linestring-layer) and
+                    two distances (from...to) to the start-point and the offset to that line.
+                    <img class="sized_block_image" src="images/2023-05-29 linear_referencing_prinzip_lol.png" alt="Line-on-Line">
+                    <div class="block_image_label">
+                        <b>Line-on-Line-feature</b><br /> left-side: LoL-Dialog<br /> right side: attribute form with
+                        minimal necessary data for line-on-line-features:
+                        <ul>
+                            <li>Feature-Identifier (PK)</li>
+                            <li>Reference-Line-ID</li>
+                            <li>two measures from...to</li>
+                            <li>offset = distance to reference line</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="p_lvl_3">
+                    <h3>Caveats</h3>
+                    <div>Linear-Referenced Features have some special characteristics in contrast to "normal"
+                        Linestring/Point-Layers:<br /> The resulting segment- or point-feature is dependent on two
+                        sources: the data-layer and a 1:n-related reference-layer. So the calculated geometry of every
+                        feature is dependent on the referenced linestring-feature and any change of the linestring will
+                        propagate to the calculated point or segment.<br /> This is the clue of linear referencing, but
+                        can lead to unwanted results, especially if the two data-sources are administrated by different
+                        persons.<br /> Imagine a simple Linestring with some points spread on it, f. e. a river with
+                        some river weirs, referenced by that line via unique id and a measure to the startpoint of that
+                        line, the mouth. There is a renaturation-project on that river, the river gets extended and has
+                        more place for meandering and the reference-line has to be adjusted.<br /> In that case all
+                        points after the prolongation will move towards the mouth and their measure values have to be
+                        altered to keep their original position. <br /> Workaround for that problem could be to
+                        <ul>
+                            <li>if you are the admin of both data-sources: remember this and change the measures
+                                manually
+                            </li>
+                            <li>do this automatically by database-trigger, provided the data stored in the same database
+                            </li>
+                            <li>in geo-databases: additionally store the original calculated point/segment-geometries in
+                                geometry fields and recalculate the measures by snapping the calculated copies on the
+                                changed reference-line.
+                            </li>
+                            <li>...</li>
+                        </ul>
+                    </div>
+                    <div>
+                        Another Problem is the reference-id, all measured-points can be quick lose their calculated
+                        positions, if the join-id changes in reference- or data-layer, or the referenced line gets
+                        deleted or filtered.
+                    </div>
+                </div>
+            </div>
+            <div class="p_lvl_2" id="pre_requisits">
+                <h2>Pre-Requisites</h2>
+                <div class="p_lvl_3">
+                    <h3>Reference-Layer</h3>
+                    <div class="notes">see <a href="#pol_reference_layer">PoL Reference-Layer</a> and
+                        <a href="#lol_reference_layer">LoL Reference-Layer</a></div>
+                    <ul>
+                        <li>vector-layer with linestring geometries</li>
+                        <li>
+                            any QGis-supported format: shapefile, GeoPackage, SpatiaLite, geo-database...
+                        </li>
+                        <li>
+                            Single identify column ("unique primary key")
+                        </li>
+                        <li>Geometry-Types:
+                            <ul>
+                                <li>Linestring, Linestring-M, Linestring-Z, Linestring-MZ</li>
+                                <li>Multi-Linestring, Multi-Linestring-M, Multi-Linestring-Z, Multi-Linestring-MZ</li>
+                            </ul>
+
+                        </li>
+                    </ul>
+                </div>
+                <div class="p_lvl_3">
+                    <h3>Data-storage</h3>
+                    <div class="notes">Note: storage is optional, the plugin can be used for measurement purposes only
+                    </div>
+                    <div class="notes">see <a href="#pol_data_layer">PoL Data-Layer</a> and <a href="#lol_data_layer">LoL
+                        Data-Layer</a>
+                    </div>
+                    <ul>
+                        <li>geometry-less</li>
+                        <li>GPKG/SpatiaLite/SQLite, office-formats (excel/odt, possible but not recommended),
+                            geo-database, ODBC
+                        </li>
+                        <li>editable (update, insert, delete, otherwise only viewing possible)</li>
+                        <li>some necessary attributes depending on feature-type</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="p_lvl_2" id="installation_and_run">
+                <h2>Installation and run</h2>
+                <ul>
+                    <li>Install the LinearReferencing-plugin via QGis-Plugin-Dialog (should be done, otherwise you
+                        probably would not read this documentation...)
+                    </li>
+                    <li>new toolbar:
+                        <img class="block_image" src="images/2023-06-09 LinearReferencingToolbar.png" alt="Toolbar" />
+                    </li>
+                    <li>new
+                        menu-entries (same functionalities):<img class="block_image"
+                                                                 src="images/2023-06-09 LinearReferencingMenu.png"
+                                           alt="Menu" />
+                    </li>
+
+
+                </ul>
+
+            </div>
+            <div class="p_lvl_2" id="pol">
+                <h2>PoL-Dialog -> Point-on-Line-Features:</h2>
+                <div class="p_lvl_3" id="pol_measure">
+                    <h3>Measure</h3>
+                    <div class="notes">if necessary: configure reference-layer in "Settings"-area (for convenience the
+                        first linestring-layer will be used automatically)
+                    </div>
+                    <ol>
+                        <li>Start map-tool via toolbar or menu</li>
+                        <li>move mouse-cursor over reference-line-features on map</li>
+                        <li>click at desired position to finish measure and freeze results in dialog:</li>
+                    </ol>
+
+                    <img class="sized_block_image" src="images/2023-06-09 LinearReferencingPoLDialogMeasure.png" alt="Point-on-Line dialog">
+
+                    <ol>
+                        <li>PK and Display-Expression of referenced feature</li>
+                        <li>call attribute-form for referenced feature</li>
+                        <li>zoom to referenced feature</li>
+                        <li>cursor-coord-x<a href="#note_4"><sup>*4</sup></a></li>
+                        <li>cursor-coord-y<a href="#note_4"><sup>*4</sup></a></li>
+                        <li>snapped-coord-x
+                            <a href="#note_4"><sup>*4</sup></a><a href="#note_5"><sup>*5</sup></a>
+                        </li>
+                        <li>snapped-coord-y
+                            <a href="#note_4"><sup>*4</sup></a><a href="#note_5"><sup>*5</sup></a>
+                        </li>
+                        <li>distance to start-point of referenced feature (layer-units, changeable via numeric input
+                            or spin-buttons, ctrl/shift/ctrl+shift-modifiers with factors 10, 100, 1000)</li>
+                        <li>distance to start-point of referenced feature (percent, changeable via numeric input
+                            or spin-buttons)</li>
+                        <li>move point to start of referenced line</li>
+                        <li>move point towards start of referenced line (ctrl/shift/ctrl+shift-modifiers with factors
+                            10, 100, 1000)</li>
+                        <li>move Point (interactive on canvas)</li>
+                        <li>move point towards end of referenced line (ctrl/shift/ctrl+shift-modifiers with factors
+                            10, 100, 1000)</li>
+                        <li>move point to end of referenced line</li>
+                        <li>pan to point</li>
+                        <li>clear results and resume measure</li>
+                    </ol>
+
+
+                </div>
+                <div class="p_lvl_3" id="pol_storage">
+                    <div class="notes">if necessary: configure and/or create data-layer in "Settings"-area, see
+                        <a href="#pol_data_layer"></a>
+                    </div>
+                    <h2>Storage</h2>
+                </div>
+                <div class="p_lvl_3" id="pol_feature_selection">
+                    <h2>Feature-Selection</h2>
+                </div>
+                <div class="p_lvl_3" id="pol_layers_and_fields">
+                    <h3>Layers and Fields:</h3>
+                    <div class="p_lvl_4" id="pol_reference_layer">
+                        <h4>Reference-Layer:</h4>
+                    </div>
+                    <div class="p_lvl_4" id="pol_data_layer">
+                        <h4>Data-Layer:</h4>
+                    </div>
+                    <div class="p_lvl_4" id="pol_show_layer">
+                        <h4>Show-Layer:</h4>
+                    </div>
+                </div>
+                <div class="p_lvl_3" id="pol_styles">
+                    <h2>Styles:</h2>
+                </div>
+                <div class="p_lvl_3" id="pol_configurations">
+                    <h2>Store/Restore Configurations:</h2>
+                </div>
+
+            </div>
+            <div class="p_lvl_2" id="lol">
+                <h2>LoL-Dialog -> Line-on-Line-Features:</h2>
+                <div class="p_lvl_3" id="lol_measure">
+                    <h3>Measure</h3>
+                    <div class="notes">if necessary: configure reference-layer in "Settings"-area (for convenience the
+                        first linestring-layer will be used automatically)
+                    </div>
+                    <ol>
+                        <li>Start map-tool via toolbar or menu</li>
+                        <li>move mouse-cursor over reference-line-features on map</li>
+                        <li>mouse down at desired from-position to begin measure</li>
+                        <li>mouse-up at desired to-position to finish measure and freeze results in
+                            dialog:</li>
+                    </ol>
+                    <img class="sized_block_image" src="images/2023-06-11 LinearReferencingLoLDialogMeasure.png" alt="Lol-Dialog">
+                    <ol>
+                        <li>PK and Display-Expression of referenced feature</li>
+                        <li>call attribute-form for referenced feature</li>
+                        <li>zoom to referenced feature</li>
+                        <li>Offset == distance between segment and referenced line, &gt; 0 left side, &lt; 0 right
+                            side (in digitize-direction of referenced line)</li>
+                        <li>cursor-coord-x<a href="#note_4"><sup>*4</sup></a></li>
+                        <li>cursor-coord-y<a href="#note_4"><sup>*4</sup></a></li>
+                        <li>snapped-from-coord-x
+                            <a href="#note_4"><sup>*4</sup></a><a href="#note_5"><sup>*5</sup></a>
+                        </li>
+                        <li>snapped-from-coord-y
+                            <a href="#note_4"><sup>*4</sup></a><a href="#note_5"><sup>*5</sup></a>
+                        </li>
+                        <li>snapped-to-coord-x
+                            <a href="#note_4"><sup>*4</sup></a><a href="#note_5"><sup>*5</sup></a>
+                        </li>
+                        <li>snapped-to-coord-y
+                            <a href="#note_4"><sup>*4</sup></a><a href="#note_5"><sup>*5</sup></a>
+                        </li>
+                        <li>from-point-distance to start-point of referenced feature (layer-units)</li>
+                        <li>from-point-distance to start-point of referenced feature (percent)</li>
+                        <li>to-point-distance to start-point of referenced feature (layer-units)</li>
+                        <li>to-point-distance to start-point of referenced feature (percent)</li>
+                        <li>move to reference-line start</li>
+                        <li>flip segment towards reference-line start (maintain length, new to-point = old
+                            from-point)</li>
+                        <li>move towards reference-line start (ctrl/shift/ctrl+shift-modifiers with factors
+                            10, 100, 1000)</li>
+                        <li>length of segment (layer-units, changeable via numeric input
+                            or spin-buttons, ctrl/shift/ctrl+shift-modifiers with factors 10, 100, 1000, to-point
+                            is altered)</li>
+                        <li>move towards reference-line end (ctrl/shift/ctrl+shift-modifiers with factors
+                            10, 100, 1000)</li>
+                         <li>flip segment towards reference-line end (maintain length, new from-point = old to-point)</li>
+                        <li>Buttons to move the segment towards reference-line end (end-point or stepwise 1/10/100/1000m
+                            click/ctrl/shift/ctrl+shift)</li>
+
+                        <li>move From-Point (click on canvas and chose new start-point)</li>
+                        <li>move To-Point (click on canvas and chose new end-point)</li>
+                    </ol>
+                </div>
+                <div class="p_lvl_3" id="lol_storage">
+                    <h2>Storage</h2>
+                </div>
+                <div class="p_lvl_3" id="lol_feature_selection">
+                    <h2>Feature-Selection</h2>
+                </div>
+                <div class="p_lvl_3" id="lol_layers_and_fields">
+                    <h3>Layers and Fields:</h3>
+                    <div class="p_lvl_4" id="lol_reference_layer">
+                        <h4>Reference-Layer:</h4>
+                    </div>
+                    <div class="p_lvl_4" id="lol_data_layer">
+                        <h4>Data-Layer:</h4>
+                    </div>
+                    <div class="p_lvl_4" id="lol_show_layer">
+                        <h4>Show-Layer:</h4>
+                    </div>
+                </div>
+                <div class="p_lvl_3" id="lol_styles">
+                    <h2>Styles:</h2>
+                </div>
+                <div class="p_lvl_3" id="lol_configurations">
+                    <h2>Store/Restore Configurations:</h2>
+                </div>
+            </div>
+            <div id="attribute_tables">
+                <h2>Attribute tables:</h2>
+            </div>
+            <div id="notes">
+                <h2>Notes</h2>
+                <div id="note_1">
+                    <sup>*1</sup><br /> Multi-types because of shapefile-format, which does not distinguish between
+                    single- and multi-part-geometries.<br /> Digitizing can be done on single-part features, but in case
+                    of multipart-geometries the results are indefinite and therefore no display. (Which part ist
+                    referenced by the measures? What about gaps between the parts?...)
+                </div>
+                <div id="note_2">
+                    <sup>*2</sup><br /> Any existing M-contents, usually the calculated distance to the start-point of
+                    the line, will be ignored.
+                </div>
+                <div id="note_3">
+                    <sup>*3</sup><br /> Independent from this plugin and the QGis/Spatialite capabilities these M-values
+                    can be used to enable additional possibilities, f.e. calculation of for segments in a PostGis-View
+                    with m-values which
+                    <ul>
+                        <li>are compressed/stretched/calibrated</li>
+                        <li>don't start at 0.0 m</li>
+                        <li>do not represent the distance</li>
+                    </ul>
+                    (only two restrictions for m-values in PostGIS: numeric and strictly increasing over the course of a
+                    geometry.)
+                </div>
+                <div id="note_4"><sup>*4</sup><br /> Projection for the cursor- and snap-coordinates is
+                    canvas-projection
+                </div>
+                <div id="note_5"><sup>*5</sup><br /> automatically applied snap-settings for reference-layer:
+                    <ul>
+                        <li>"Advanced configuration"</li>
+                        <li>"snap to segment and line-endpoints"</li>
+                        <li>"10px tolerance"</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>

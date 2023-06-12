@@ -1,0 +1,72 @@
+@charset "UTF-8";
+/**
+CSS-Styles for Linear-Referencing-Plugin-Documentation
+@author Ludwig Kniprath ludwig@kni-online.de
+Rev. 2023-06-08
+*/
+
+* {
+	font-family: Arial, Helvetica Neue, Helvetica, sans-serif;
+}
+html, body {
+	color: black;
+	font-size: 12pt;
+}
+
+div.notes {
+    font-size: 10pt;
+    margin: 5pt;
+    margin-left: 20px;
+    color: gray;
+}
+
+div.p_lvl_1 {
+    margin-left: 20px;
+}
+
+div.p_lvl_1 > h1 {
+    margin-left: -20px;
+}
+
+div.p_lvl_2 {
+    margin-left: 20px;
+}
+
+div.p_lvl_2 > h2 {
+    margin-left: -20px;
+}
+
+div.p_lvl_3 {
+    margin-left: 20px;
+}
+
+div.p_lvl_3 > h3 {
+    margin-left: -20px;
+}
+
+div.p_lvl_4 {
+    margin-left: 20px;
+}
+
+div.p_lvl_4 > h4 {
+    margin-left: -20px;
+}
+
+img.block_image {
+    display: block;
+    margin-left: 50px;
+    height: auto;
+}
+
+img.sized_block_image {
+    display: block;
+    margin-left: 50px;
+    width: 750px;
+    height: auto;
+}
+
+div.block_image_label {
+    font-size: 8pt;
+    margin-left: 100px;
+    color: gray;
+}
