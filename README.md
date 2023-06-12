@@ -1,22 +1,107 @@
-# QGisLinearReference
-QGis-Python-Plugin for linear referenced data (point-on-line/line_on_line)
+# QGisLinearReference #
 
-Enables the user to create virtual layers with geometries defined by the reference to a line-vector and *one* (point_on_line) or *two* measures (from...to) on that line and an optional offset (line_on_line).
+QGis-Python-Plugin for linear referenced data
+- "PoL" => "Point-on-Line" 
+- "LoL" => "Line-on-Line"
 
-The original purpose were "events" along rivers, e. g. care measures on the riverbanks.
+Original purpose:
+"events" along rivers, e.g. buildings along a river (PoL) or care measures on the riverbanks (LoL).
 
-These layers need a reference-layer with geometry type linestring or linestringM (but the M-Value is regrettably not used) and a data-table with at least the fields:
-1. both types: field that holds the reference to the line-layer (usually the fid-column of the line-theme), 
-2. both types: a float-type column with the measure 1, 
-3. line_on_line: a float-type column with the measure for Point 2, 
-4. line_on_line: an optional float-column with the parallel offset of the created line-segment from the reference line (positive: left side, negative: right side in the direction of the line-geometry). 
+## Uses three types of layers for PoL/LoL: ##
 
-And any number of additional fields in the data-table for the necessary data of the point or the line-segment.
+### "data-layer" ###
+- geometry-less "layers" in the current project
+- can be created with support of this plugin (GeoPackage)
+- or used, if they allready exist as layer in the current project
+  - GeoPackage, PostGIS 
+  - possible, tested, **not** recommended: Excel, LibreOffice...
+- should be editable (insert/update/delete-privileges required, otherwise only viewer-functionality)
+- need a 
+  - unique-id-field (usually the primary-key)
+  - reference-field to join the reference-layer
+  - measure-fields (one for PoL, two for LoL, numeric type)
+  - for LoL: offset-field (numeric) for the parallel offset of the segments from the referenced line (positive: left side, negative: right side).
+  
+### "reference-layer" ###
+- vector-layer (GeoPackage, PostGIS, Shape...)
+- type linestring/linestringM/linestringZ/linestringMZ... (M-values not taken into account)
+  - hint: Shape-files don't differentiate single- and multipart-geometries, therefore also the linestring-xx-multi-versions are possible, but not tested and results not predictable 
+- unique-ID-field (type integer or string, usually the primary-key) for join the data-layer
 
-The resulting layers are 'memory layer' which you can export to different vector formats.
+### "show-layer" ###
+- virtual layer or imported database-view
+- calculate the point/segment-geometries 
+  - database f.e. PostGIS-view:
+    - recommended in case of requirements respecting
+      - performance (QGis-virtual-layer tend to be slow) 
+      - security (constraints/foreign keys/transactions/user-privileges/backups...)
+      - possibilities (multi-user, Network-Access)
+      - and... and...
+    - hint: the database should contain both layers to join them in a view and get the security benefits mentioned above, else joins to remote databases must be implemented
+  - virtual:
+    - QGis-internal solution that combines data- and reference-layer and calculates the PoL/LoL-Features with expressions "ST_Line_Interpolate_Point(...)" or "ST_Line_Substring(...)" 
+    - data/reference-layer can come from totally different sources (f.e. join Excel-Table with Shape-File)
+    - if created by plugin: initially contain only the minimal necessary fields (ID, reference-ID, measures, offset), all other fields from data- and reference-layer are joined
 
-You can also manually update the features of an existing data-table (with virtual Layer) or define a target-data-table via plugin and append new or update existing features.
+Samples:
 
-You can also use the plugin without creating memory tables/virtual layers just to visiualize the position of points/line-segments along a line.
+PoL:
+``` SQL
+SELECT data_lyr.fid as "fid",
+ data_lyr.line_ref_id as "line_ref_id",
+ data_lyr.measure as "measure",
+ ST_Line_Interpolate_Point(ref_lyr.geometry, data_lyr."measure"/st_length(ref_lyr.geometry)) as point_geom
+FROM  "data_lyr_xyz" as data_lyr
+  INNER JOIN "ref_lyr_xyz" as ref_lyr ON data_lyr."line_ref_id" = ref_lyr."gew_id"
+```
 
-This is my first plugin for QGis, so please be patient and report bugs, ideas for missing features or translation-errors. 
+LoL:
+``` SQL
+SELECT data_lyr.upabs_id as "upabs_id",
+ data_lyr.line_ref_id as "line_ref_id",
+ data_lyr.measure_from as "measure_from",
+ data_lyr.measure_to as "measure_to",
+ data_lyr.offset as "offset",
+ CASE WHEN data_lyr."offset" is null or data_lyr."offset" = 0 THEN ST_Line_Substring(ref_lyr.geometry, min(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry),max(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry)) ELSE ST_OffsetCurve(ST_Line_Substring(ref_lyr.geometry, min(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry),max(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry)),data_lyr."offset") END as line_geom /*:linestring:25832*/
+FROM  "data_lyr_xyz" as data_lyr
+  INNER JOIN "ref_lyr_xyz" as ref_lyr ON data_lyr."line_ref_id" = ref_lyr."gew_id"
+```
+hint: the expression for LoL-features looks a bit tricky, but the "CASE WHEN"-part was necessary because of a "bug" (?) in QGis (under windows only...), 
+which refused to calculate geometries for offset value 0.
+## The plugin can be used in different ways: ##
+### Measure ###
+- Just show measures for the current cursor-Position on the appropriate feature of the "reference-layer" 
+- "Mouse-Press" to set temporary markers ("point-on-line" => one green marker, one measure, "line-on-line" two markers green/red, two measures)
+### Create layer ###
+- create data-layer for storing features with the relevant reference data (measure, measure-from, measure-to, offset, reference-id)
+- create virtual show-layer to show/style/export the features
+### data maintenance ###
+- import external sources to QGis-project
+- show, create, update, delete features
+- access plugin-functionality from dialog and/or feature-tables and -forms (the plugin places two "actions" to feature-tables and attribute-forms of data-and show-layer for Zoom/Pan/Edit)
+
+## Addendum ##
+- the Plugin was developed in 2023 with the newest available QGis-version:
+  - 3.30 "s'Hertogenbosch"
+  - Windows (11)
+  - Linux (Mint 21.1 "Vera")
+- not tested with older/LTR-versions
+- not tested on QGis for macOS
+- please report bugs or ideas for missing features 
+- or translation-errors :-)
+
+
+## More Instructions: ##
+[docs/index.html](./docs/index.html)
+
+
+## Contribute ##
+- Issue Tracker: https://github.com/Ludwig-K/QGisLinearReference/issues
+- Source Code: https://github.com/Ludwig-K/QGisLinearReference
+
+## Support ##
+If you are having issues, please let me know.
+You can directly contact me via ludwig@kni-online.de
+
+## License ##
+The project is licensed under the GNU GPL 2 license.
