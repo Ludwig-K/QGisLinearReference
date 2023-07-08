@@ -10,4 +10,4 @@ SOURCES = ../map_tools/LolEvt.py\
 ../tools/MyToolFunctions.py\
 ../LinearReference.py
 
-TRANSLATIONS = LinearReferencing_de.ts LinearReferencing_fr.ts
+TRANSLATIONS = LinearReferencing_de.ts
