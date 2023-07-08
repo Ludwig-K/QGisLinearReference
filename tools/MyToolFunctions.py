@@ -38,6 +38,39 @@ import qgis
 from qgis import core
 
 
+def qt_format(in_string,*args):
+    """special for QtCore.QCoreApplication.translate in dialogs, tooltips...
+    Some richtext-markups are supported:
+    https://doc.qt.io/qtforpython-5/overviews/richtext-html-subset.html#supported-html-subset
+    but special-chars and formatting tags are often difficult to translate, because they appear in escaped form inside the pylupdate5-created ts-file
+    this function uses special wildcards to avoid these problems
+    inside the translate-strings they have to be embedded with {curly} braces
+    :param in_string: input
+    :param *args: optional "normal" format-parameters, which replace numerical wildcards {0} {1}... by their index
+    """
+    # Rev. 2023-07-03
+    qt_wildcards = {
+        'apos': "'",
+        'nbsp': "&nbsp;",
+        'arrow': "➜",
+        'br': "<br />",
+        'hr': "<hr />",
+        'b1': "<b>",
+        'b2': "</b>",
+        'lt': "&lt;",
+        'gt': "&gt;",
+        'ul_1': "<ul style='margin: 0 0 0 0;'>",
+        'ul_2': "</ul>",
+        'li_1': "<li>",
+        'li_2': "</li>",
+        #avoids implicit word-wrap in tooltips:
+        'div_pre_1': "<div style='white-space:nowrap; margin: 0 0 0 0;'>",
+        'div_pre_2': "</div>",
+        'div_ml_1': "<div style='margin: 0 0 0 10;'>",
+        'div_ml_2': "</div>",
+    }
+    # ** => spreads the dictionary to name=value pairs
+    return in_string.format(*args,**qt_wildcards)
 
 def select_by_value(wdg_with_model,select_value,col_idx = 0,role_idx = 0):
     """helper-function that selects an item in a QComboBox by its value, blocks any signals

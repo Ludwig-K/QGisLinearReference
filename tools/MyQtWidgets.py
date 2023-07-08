@@ -615,11 +615,11 @@ class QComboBoxN(QtWidgets.QComboBox):
                 clear_button.clicked.connect(lambda: self.setCurrentIndex(-1))
                 if self.clear_button_icon:
                     # default: QtWidgets.QApplication.instance().style().standardIcon(70)
-
                     clear_button.setIcon(self.clear_button_icon)
 
+
                 # no effect inside QLineEdit...
-                # clear_button.setIconSize(self.clear_button_size)
+                # clear_button.setIconSize(QtCore.QSize(8, 8))
                 # self.lineEdit().setStyleSheet("QToolButton {width: 5px; height: 5px;}")
                 # ugly: clear_button.setFixedSize(15,15)
 
