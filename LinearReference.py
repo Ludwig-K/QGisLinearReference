@@ -24,12 +24,14 @@ the Free Software Foundation; either version 2 of the License, or
 
 ********************************************************************
 """
-# Rev. 2023-04-21
+# Rev. 2023-06-18
+
 import os, qgis, webbrowser
 from PyQt5 import QtCore, QtGui, QtWidgets
 from LinearReferencing import tools, map_tools
 from LinearReferencing.tools.MyDebugFunctions import get_debug_pos as gdp
 from LinearReferencing.tools.MyDebugFunctions import debug_print
+from LinearReferencing.tools.MyToolFunctions import qt_format
 
 from LinearReferencing.icons import resources
 
@@ -98,7 +100,7 @@ class LinearReference(object):
 
 
     def install_translator(self):
-        """Find and load QtLinguist-File *.qm"""
+        """Find and load compiled QtLinguist-File *.qm"""
         # Rev. 2023-04-21
         if QtCore.QSettings().value('locale/overrideFlag', type=bool):
             # locale in QGis-Settings perhaps different from system, default: 'en_US' (if overrideFlag is set but no userLocale defined)
@@ -108,29 +110,30 @@ class LinearReference(object):
 
         try:
             # search translation-file for locale
-            # uses only first two chars, 'de_DE' 'de_AT' 'de_CH' 'de_BE' 'de_LI' ➜ 'de',
+            # use only first two chars, 'de_DE' 'de_AT' 'de_CH' 'de_BE' 'de_LI' ➜ 'de', en_US ➜ en
             plugin_dir = os.path.dirname(__file__)
-            qm_path = os.path.join(plugin_dir, 'i18n', 'LinearReferencing_{}.qm'.format(locale[0:2]))
+            qm_path = os.path.join(plugin_dir, 'i18n', f"LinearReferencing_{locale[0:2]}.qm")
             if os.path.exists(qm_path):
-                # store as Plugin-Property, else destroyd/garbage-collected and no translations :-(
+                # must be stored as property, else destroyd/garbage-collected and no translations :-(
                 self.translator = QtCore.QTranslator()
                 load_result = self.translator.load(qm_path)
                 if load_result:
                     QtCore.QCoreApplication.installTranslator(self.translator)
                 else:
-                    raise Exception(f"Translator-File '{qm_path}' not loaded...")
+                    # raise Exception(f"Translator-File '{qm_path}' not loaded...")
+                    pass
             else:
-                raise Exception(f"Translator-Datei '{qm_path}' not found...")
+                # raise Exception(f"Translator-Datei '{qm_path}' not found...")
+                pass
         except Exception as e:
-            # only german translation partially implemented
             # print(f"Expected exception in {gdp()}: \"{e}\"")
             pass
 
 
-    def tr(self, message: str) -> str:
-        """ Wrapper for Qt-Translations outside from Qt-Objects"""
-        # Rev. 2023-04-21
-        return QtCore.QCoreApplication.translate(type(self).__name__, message)
+    # def tr(self, message: str) -> str:
+    #     """ Wrapper for Qt-Translations outside from Qt-Objects"""
+    #     # Rev. 2023-04-21
+    #     return QtCore.QCoreApplication.translate(type(self).__name__, message)
 
     def initGui(self):
         """"standard-to_implement-function for plugins: adapt/extend GUI triggered by plugin-activation or project-open"""
@@ -139,34 +142,38 @@ class LinearReference(object):
         self.lref_toolbar.setObjectName('LinearReferencingToolbar')
         self.lref_toolbar.setToolTip('LinearReferencing Toolbar')
 
+        # some markup-wildcards for pylupdate5/lsrelease/QtCore.QCoreApplication.translate
+        hr = "<hr />"
+        b1 = "<b>"
+        b2 = "</b>"
 
         if self.install_PolEvt:
             ## PolEvt
-            self.qact_PolEvt = QtWidgets.QAction(QtGui.QIcon(':icons/linear_referencing_point.svg'),"Measure and Digitize Point-on-Line Features",self.iface.mainWindow())
+            self.qact_PolEvt = QtWidgets.QAction(QtGui.QIcon(':icons/linear_referencing_point.svg'),QtCore.QCoreApplication.translate('LinearReference',"Measure and Digitize Point-on-Line Features"),self.iface.mainWindow())
             self.qact_PolEvt.setCheckable(True)
             self.qact_PolEvt.triggered.connect(self.set_map_tool_PolEvt)
             self.qact_PolEvt.setEnabled(True)
-            self.qact_PolEvt.setToolTip(self.tr("<b>LinearReferencing</b><hr>Measure and Digitize Point-on-Line Features"))
+            self.qact_PolEvt.setToolTip(qt_format(QtCore.QCoreApplication.translate('LinearReference',"{b1}LinearReferencing{b2}{hr}Measure and Digitize Point-on-Line Features")))
             self.lref_toolbar.addAction(self.qact_PolEvt)
             self.iface.addPluginToMenu('LinearReferencing', self.qact_PolEvt)
             self.iface.mapToolActionGroup().addAction(self.qact_PolEvt)
 
         if self.install_LolEvt:
-            self.qact_LolEvt = QtWidgets.QAction(QtGui.QIcon(':icons/linear_referencing.svg'),"Measure and Digitize Line-on-Line Features",self.iface.mainWindow())
+            self.qact_LolEvt = QtWidgets.QAction(QtGui.QIcon(':icons/linear_referencing.svg'),QtCore.QCoreApplication.translate('LinearReference',"Measure and Digitize Line-on-Line Features"),self.iface.mainWindow())
             self.qact_LolEvt.setCheckable(True)
             self.qact_LolEvt.triggered.connect(self.set_map_tool_LolEvt)
             self.qact_LolEvt.setEnabled(True)
-            self.qact_LolEvt.setToolTip(self.tr('<b>LinearReferencing</b><hr>Measure and Digitize Line-on-Line Features'))
+            self.qact_LolEvt.setToolTip(qt_format(QtCore.QCoreApplication.translate('LinearReference','{b1}LinearReferencing{b2}{hr}Measure and Digitize Line-on-Line Features')))
             self.lref_toolbar.addAction(self.qact_LolEvt)
             self.iface.mapToolActionGroup().addAction(self.qact_LolEvt)
             self.iface.addPluginToMenu('LinearReferencing', self.qact_LolEvt)
 
         if self.install_Help:
-            self.qact_ShowHelp = QtWidgets.QAction(QtGui.QIcon(':icons/account-question-outline.svg'),"Show Help",self.iface.mainWindow())
+            self.qact_ShowHelp = QtWidgets.QAction(QtGui.QIcon(':icons/account-question-outline.svg'),QtCore.QCoreApplication.translate('LinearReference',"Show Help"),self.iface.mainWindow())
             self.qact_ShowHelp.triggered.connect(self.show_help)
             self.lref_toolbar.addAction(self.qact_ShowHelp)
             self.iface.addPluginToMenu('LinearReferencing', self.qact_ShowHelp)
-            self.qact_ShowHelp.setToolTip(self.tr('<b>LinearReferencing</b><hr>Show Help'))
+            self.qact_ShowHelp.setToolTip(qt_format(QtCore.QCoreApplication.translate('LinearReference','{b1}LinearReferencing{b2}{hr}Show Help')))
 
 
     def recheck_settings(self, layers):
@@ -232,32 +239,17 @@ class LinearReference(object):
         url = QtCore.QUrl.fromLocalFile(os.path.join(os.path.dirname(__file__), 'docs', 'index.html')).toString()
         webbrowser.open(url, new=2)
 
-    # def set_map_tool_LolEvt(self, checked: bool) -> None:
-    #     """set this MapTool for the canvas
-    #     :param checked: Status of the checkable Action
-    #     """
-    #     # Rev. 2023-04-21
-    #
-    #     if checked:
-    #         # already initialized if an existing project was opened
-    #         if not self.mt_LolEvt:
-    #             self.mt_LolEvt = map_tools.LolEvt(self.iface)
-    #
-    #         self.iface.mapCanvas().setMapTool(self.mt_LolEvt)
-    #         if self.mt_LolEvt.my_dialogue.first_run:
-    #             # if opened first time the 0/0-Standard-Window-Position can be problematic, even not visible, on MultiMonitors
-    #             self.mt_LolEvt.my_dialogue.move(int(self.iface.mainWindow().x() + 0.7 * self.iface.mainWindow().width()), int(self.iface.mainWindow().y() + 0.2 * self.iface.mainWindow().height()))
-    #             self.mt_LolEvt.my_dialogue.first_run = False
-    #         self.mt_LolEvt.my_dialogue.show()
-    #     else:
-    #         self.mt_LolEvt.my_dialogue.hide()
-    #         self.iface.actionPan().trigger()
-
     def set_map_tool_PolEvt(self) -> None:
         """set this MapTool for the canvas"""
         # Rev. 2023-04-21
         if not self.mt_PolEvt:
             self.mt_PolEvt = map_tools.PolEvt(self.iface)
+            self.iface.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.mt_PolEvt.my_dialogue)
+            self.mt_PolEvt.my_dialogue.setFloating(True)
+            start_pos_x = int(self.iface.mainWindow().x() + 0.15 * self.iface.mainWindow().width())
+            start_pos_y = int(self.iface.mainWindow().y() + 0.15 * self.iface.mainWindow().height())
+            self.mt_PolEvt.my_dialogue.setGeometry(start_pos_x, start_pos_y, 530, 440)
+
 
         # restores a minimized or hidden (==closed) window
         if (QtCore.Qt.WindowMinimized & self.mt_PolEvt.my_dialogue.windowState()) or not self.mt_PolEvt.my_dialogue.isVisible():
@@ -276,6 +268,11 @@ class LinearReference(object):
         # Rev. 2023-04-21
         if not self.mt_LolEvt:
             self.mt_LolEvt = map_tools.LolEvt(self.iface)
+            self.iface.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.mt_LolEvt.my_dialogue)
+            self.mt_LolEvt.my_dialogue.setFloating(True)
+            start_pos_x = int(self.iface.mainWindow().x() + 0.2 * self.iface.mainWindow().width())
+            start_pos_y = int(self.iface.mainWindow().y() + 0.2 * self.iface.mainWindow().height())
+            self.mt_LolEvt.my_dialogue.setGeometry(start_pos_x, start_pos_y, 750, 530)
 
         # restores a minimized or hidden (==closed) window
         if (QtCore.Qt.WindowMinimized & self.mt_LolEvt.my_dialogue.windowState())  or not self.mt_LolEvt.my_dialogue.isVisible():
@@ -283,6 +280,7 @@ class LinearReference(object):
         self.iface.mapCanvas().setMapTool(self.mt_LolEvt)
         self.mt_LolEvt.refresh_gui()
         self.mt_LolEvt.my_dialogue.show()
+
 
 
 

@@ -12,7 +12,7 @@ Original purpose:
 ### "data-layer" ###
 - geometry-less "layers" in the current project
 - can be created with support of this plugin (GeoPackage)
-- or used, if they already exist as layer in the current project
+- or used, if they allready exist as layer in the current project
   - GeoPackage, PostGIS 
   - possible, tested, **not** recommended: Excel, LibreOffice...
 - should be editable (insert/update/delete-privileges required, otherwise only viewer-functionality)

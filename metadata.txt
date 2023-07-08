@@ -1,19 +1,21 @@
 [general]
 name=LinearReferencing
 description=Tools for linear referenced data
-about=Tools for linear referenced data: Simple measure positions on a linestring layer, create and edit geometryless point-on-line/line-on-line-data-layers, create virtual layer to show point-on-line/line-on-line-data on maps.
+about=Tools for linear referenced data:
+  - measure routes and points on linestring layers
+  - create tables for point- or route features or use existing ones
+  - insert or update features numerical and/or graphical
+  - create virtual layers or use existing ones to represent features on map
+  - accepts any source-type for reference- and data-layer
+  - easy to use
 version=1.0
 qgisMinimumVersion=3.0
 qgisMaximumVersion=3.99
 author=Ludwig Kniprath
 email=ludwig@kni-online.de
-
 tracker=https://github.com/Ludwig-K/QGisLinearReference/issues
 repository=https://github.com/Ludwig-K/QGisLinearReference
-
-# Tags are comma separated with spaces allowed
 tags=python, linear reference, linear referencing, event theme, lrs, dynamic segmentation, vector
-
 homepage=https://github.com/Ludwig-K/QGisLinearReference/edit/main/README.md
 category=Plugins
 icon=icons/linear_referencing.svg
