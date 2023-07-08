@@ -30,6 +30,8 @@ from LinearReferencing.icons import resources
 from LinearReferencing.tools.MyDebugFunctions import debug_print
 from LinearReferencing.tools.MyDebugFunctions import get_debug_pos as gdp
 
+from LinearReferencing.tools.MyToolFunctions import qt_format
+
 
 class PolEvt(qgis.gui.QgsMapToolEmitPoint):
     """MapTool for Digitize Point-Events via reference-line and measured distance to startpoint"""
@@ -41,9 +43,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
     _lyr_act_id_2 = QtCore.QUuid('87654321-DCBA-1234-abcd-ba9876543210')
 
     # settings self.ss can be stored for later restore, f.e. if the Pluigin is used for multiple LinearReference-Layers in the same project
-    _num_storable_settings = 10
-
-
+    _num_storable_settings = 100
 
     class StoredSettings:
         """template for self.ss ➜ stored settings, string-vars, stored in QGis-Project and dataLyr
@@ -330,7 +330,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         # int (allways): fid of the current snapped reference-line
         snapped_ref_fid = None
 
-        # pk (mostly identical to FID) of the current edited Feature in data-layer
+        # pk (mostly identical to FID) of the current edited Feature in Data-Layer
         edit_pk = None
 
         # current measure-result, distance of the snapped point to the start-point of the snapped reference-line
@@ -345,7 +345,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         # PointXY, set via canvasReleaseEvent
         mouse_up_point = None
 
-        # list of pre-selected data-layer-PKs for edit
+        # list of pre-selected Data-Layer-PKs for edit
         selected_pks = []
 
         #  for display of coordinates and measurements, dependend on canvas-projection
@@ -382,17 +382,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
         # possible values for rs.tool_mode, key: rs.tool_mode, value: Explanation for status-bar
         self.tool_modes = {
-            'init': self.tr("Initializing, please wait..."),
-
-            'measuring': self.tr("hover and click on reference-line to show coords and measures..."),
-            'after_measure': self.tr("Point on reference-line measured, edit, add feature or click again to resume..."),
-            'before_move_point': self.tr("grab point on canvas and move it to desired position on selected line"),
-            'move_point': self.tr("hold mouse-button, move grabbed point to desired position and release"),
-
-            'disabled': self.tr("no reference-layer (linestring) found or configured..."),
-            'select_features': self.tr("click or draw rect to select features [ctrl] ➜ remove from Feature-Selection [shift] ➜ add to Feature-Selection [-] ➜ replace Feature-Selection"),
-            'update_measure': self.tr("hover and click on reference-line to reposition selected feature, click 'update' to save feature..."),
-            'update_complete': self.tr("selected feature repositioned, click 'update' to save...")
+            'init': QtCore.QCoreApplication.translate('PolEvt', "Initializing, please wait..."),
+            'measuring': QtCore.QCoreApplication.translate('PolEvt', "hover on Reference-Layer-feature to show coords, click to take a measurement..."),
+            'after_measure': QtCore.QCoreApplication.translate('PolEvt', "Measurement taken; edit results/insert feature or resume..."),
+            'before_move_point': QtCore.QCoreApplication.translate('PolEvt', "drag and drop measured point on selected line..."),
+            'move_point': QtCore.QCoreApplication.translate('PolEvt', "drop the point at the desired position of the selected line..."),
+            'disabled': QtCore.QCoreApplication.translate('PolEvt', "no Reference-Layer configured..."),
+            'select_features': QtCore.QCoreApplication.translate('PolEvt', "select features from Show-Layer with point or rect; [ctrl] remove from, [shift] add to, [ ] replace current feature-selection"),
         }
 
         # initialize the four settings-"containers" with blank "templates"
@@ -424,17 +420,8 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.snap_indicator = qgis.gui.QgsSnapIndicator(self.iface.mapCanvas())
         """qgis.gui.QgsSnapIndicator: the tiny snap-icon"""
 
-
-
         self.my_dialogue = dialogs.PolDialog(iface)
         self.my_dialogue.dialog_close.connect(self.s_dialog_close)
-
-        # calculate the position for the dialog on first open
-        start_pos_x = int(self.iface.mainWindow().x() + 0.1 * self.iface.mainWindow().width())
-        start_pos_y = int(self.iface.mainWindow().y() + 0.1 * self.iface.mainWindow().height())
-        self.my_dialogue.last_frame_geometry = QtCore.QRect(start_pos_x, start_pos_y, 600, 500)
-        self.my_dialogue.set_dockable(False)
-
 
         # Section "Measure"
         self.my_dialogue.measure_grb.toggled.connect(self.s_measure_grb_toggle)
@@ -450,12 +437,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
         self.my_dialogue.pbtn_move_point.clicked.connect(self.s_move_point)
 
-
         self.my_dialogue.tbtn_move_up.clicked.connect(self.s_move_up)
         self.my_dialogue.tbtn_move_end.clicked.connect(self.s_move_end)
         self.my_dialogue.pb_pan_to_measure.clicked.connect(self.s_pan_to_measure)
         self.my_dialogue.pbtn_resume_measure.clicked.connect(self.s_resume_measure)
-
 
         # Section "Edit"
         self.my_dialogue.edit_grb.toggled.connect(self.s_edit_grb_toggle)
@@ -509,7 +494,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.my_dialogue.qcb_ref_line_line_style.currentIndexChanged.connect(self.s_change_ref_line_line_style)
         self.my_dialogue.qspb_ref_line_width.valueChanged.connect(self.s_change_ref_line_width)
 
-        #Section "Store/Restore Configuration":
+        # Section "Store/Restore Configuration":
         self.my_dialogue.store_configurations_gb.toggled.connect(self.s_toggle_configurations_gb)
         self.my_dialogue.pb_store_configuration.clicked.connect(self.s_store_configuration)
         self.my_dialogue.pb_restore_configuration.clicked.connect(self.s_restore_configuration)
@@ -518,11 +503,14 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
         self.check_settings()
 
+
+
+
     def s_move_start(self):
         """moves point to start of reference-line"""
         if self.cf.measure_completed:
             ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 self.rs.current_measure = 0
                 self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
                 self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
@@ -542,7 +530,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 delta *= 1000
 
             ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 self.rs.current_measure = max(0, self.rs.current_measure - delta)
                 self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
                 self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
@@ -562,7 +550,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 delta *= 1000
 
             ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 self.rs.current_measure = min(ref_feature.geometry().length(), self.rs.current_measure + delta)
                 self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
                 self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
@@ -571,7 +559,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         """moves point to end of reference-line"""
         if self.cf.measure_completed:
             ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 self.rs.current_measure = ref_feature.geometry().length()
                 self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
                 self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
@@ -584,11 +572,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             if checked:
                 self.check_settings('before_move_point')
             else:
+                self.vm_pt_edit.hide()
                 self.check_settings('after_measure')
 
+            self.iface.mapCanvas().setMapTool(self)
             self.dlg_refresh_measure_section()
         else:
-            self.push_messages(warning_msg=self.tr("No completed measure yet..."))
+            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No completed measure yet..."))
 
     def s_toggle_configurations_gb(self, status):
         """Toggle Group-Box in Dialog
@@ -596,7 +586,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         """
         # Rev. 2023-05-07
         if status:
-            #2147483647 ➜ max. possible value, else "OverflowError: argument 1 overflowed: value must be in the range -2147483648 to 2147483647"
+            # 2147483647 ➜ max. possible value, else "OverflowError: argument 1 overflowed: value must be in the range -2147483648 to 2147483647"
             self.my_dialogue.store_configurations_gb.setMaximumHeight(2147483647)
         else:
             self.my_dialogue.store_configurations_gb.setMaximumHeight(20)
@@ -619,7 +609,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         row_idx = self.my_dialogue.lw_stored_settings.currentRow()
         if row_idx < 0:
             try_it = False
-            info_msg = self.tr("please select an entry from the list above...")
+            info_msg = QtCore.QCoreApplication.translate('PolEvt', "please select an entry from the list above...")
         else:
             selected_item = self.my_dialogue.lw_stored_settings.item(row_idx)
             selected_label = selected_item.data(256)
@@ -639,13 +629,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                                 setattr(self.ss, prop_name, restored_value)
 
                         did_it = True
-                        success_msg = self.tr(f"Configuration '{setting_label}' restored...")
+                        success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Configuration {apos}{0}{apos} restored..."),setting_label)
                         break
 
         if try_it and did_it:
             self.refresh_gui()
 
-        self.push_messages(success_msg,info_msg,warning_msg,critical_msg)
+        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
     def push_messages(self, success_msg: str = None, info_msg: str = None, warning_msg: str = None, critical_msg: str = None):
         """pushes four kind of messages to messageBar
@@ -692,7 +682,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         row_idx = self.my_dialogue.lw_stored_settings.currentRow()
         if row_idx < 0:
             try_it = False
-            warning_msg = self.tr("please select an entry from the list above...")
+            info_msg = QtCore.QCoreApplication.translate('PolEvt', "please select an entry from the list above...")
         else:
             selected_item = self.my_dialogue.lw_stored_settings.item(row_idx)
 
@@ -704,9 +694,9 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 if setting_label and type_conversion_ok:
                     if setting_label == selected_label:
                         dialog_result = QtWidgets.QMessageBox.question(
-                            None,
+                            self.my_dialogue,
                             f"LinearReferencing ({gdp()})",
-                            self.tr(f"Delete Configuration '{setting_label}'?"),
+                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "Delete configuration {apos}{0}{apos}?"),setting_label),
                             buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
                             defaultButton=QtWidgets.QMessageBox.Yes
                         )
@@ -716,9 +706,9 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             qgis.core.QgsProject.instance().removeEntry('LinearReferencing', del_key)
                             self.dlg_refresh_stored_settings_section()
                             did_it = True
-                            success_msg = self.tr(f"Configuration '{setting_label}' deleted...")
+                            success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Configuration {apos}{0}{apos} deleted..."),setting_label)
                         else:
-                            info_msg = self.tr("Canceled by user...")
+                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
 
         self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
@@ -742,10 +732,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             selected_item = self.my_dialogue.lw_stored_settings.item(row_idx)
             default_label = selected_item.data(256)
 
-        new_label, ok = QtWidgets.QInputDialog.getText(None, self.tr(f"LinearReferencing ({gdp()})"), self.tr(f"Label for Configuration:"), QtWidgets.QLineEdit.Normal, default_label)
+        new_label, ok = QtWidgets.QInputDialog.getText(None, f"LinearReferencing ({gdp()})", QtCore.QCoreApplication.translate('PolEvt', "Label for configuration:"), QtWidgets.QLineEdit.Normal, default_label)
         if not ok or not new_label:
             try_it = False
-            info_msg = self.tr("Canceled by user...")
+            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
         else:
             new_idx = None
             not_used_idx = []
@@ -758,7 +748,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                         dialog_result = QtWidgets.QMessageBox.question(
                             None,
                             f"LinearReferencing ({gdp()})",
-                            self.tr(f"Replace stored Configuration '{new_label}'?"),
+                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "Replace configuration {apos}{0}{apos}?"),new_label),
                             buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
                             defaultButton=QtWidgets.QMessageBox.Yes
                         )
@@ -768,7 +758,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             new_idx = setting_idx
                         else:
                             try_it = False
-                            info_msg = self.tr("Canceled by user...")
+                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
                 else:
                     not_used_idx.append(setting_idx)
 
@@ -780,7 +770,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 else:
                     # or no store, if already _num_storable_settings configurations have been stored
                     try_it = False
-                    critical_msg = self.tr(f"number of stored settings exceeds maximum ({self._num_storable_settings}), please replace existing one...")
+                    critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "number of stored settings exceeds maximum ({0})..."),self._num_storable_settings)
 
             if try_it:
                 property_dict = {prop: getattr(self.ss, prop) for prop in dir(self.StoredSettings) if prop.startswith('_') and not prop.startswith('__')}
@@ -796,8 +786,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
                 self.dlg_refresh_stored_settings_section()
                 did_it = True
-                success_msg = self.tr(f"Current configuration stored under '{new_label}'...")
-
+                success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Current configuration stored under {apos}{0}{apos}..."),new_label)
 
         self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
@@ -1001,7 +990,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             ref_fid = self.my_dialogue.qcbn_snapped_ref_fid.currentData()
             if ref_fid is not None:
                 ref_feature = self.ds.refLyr.getFeature(ref_fid)
-                if ref_feature.isValid() and ref_feature.hasGeometry():
+                if ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                     extent = ref_feature.geometry().boundingBox()
                     source_crs = self.ds.refLyr.crs()
                     target_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
@@ -1011,7 +1000,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.iface.mapCanvas().zoomByFactor(1.1)
                     self.draw_reference_geom(ref_fid)
                 else:
-                    self.push_messages(warning_msg = self.tr(f"No valid reference-feature with fid '{ref_fid}'"))
+                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "No valid Reference-feature with fid {apos}{0}{apos}"),ref_fid))
 
     def s_dialog_close(self, visible):
         """slot for signal dialog_close, emitted on self.my_dialogue closeEvent
@@ -1028,7 +1017,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             # print(f"Expected exception in {gdp()}: \"{e}\"")
             pass
 
-
     def s_pan_to_measure(self):
         """slot for pan canvas-extent to self.rs.snapped_ref_fid and self.rs.current_measure"""
         # Rev. 2023-06-03
@@ -1036,64 +1024,85 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.pan_to_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
 
 
+    def check_data_feature(self,check_pk):
+        """check Data-feature: detect Null-Values"""
+        # TODO: apply filter on Data-Layer
+        warning_msg=''
+        if self.cf.data_layer_complete and self.cf.reference_layer_complete:
+            data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, check_pk)
+            if data_feature and data_feature.isValid():
+                ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
+                if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
+                    measure = data_feature[self.ds.dataLyrMeasureField.name()]
+
+                    if measure == '' or measure is None or repr(measure) == 'NULL':
+                        warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Data-feature with PK {apos}{0}{apos} is invalid: Null-Value in measurement-field {apos}{1}.{2}{apos}"),check_pk, self.ds.dataLyr.name(), self.ds.dataLyrMeasureField.name())
+                else:
+                    warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt',"Data-feature with PK {apos}{0}{apos} is invalid: no Reference-feature with ID {apos}{1}{apos} in layer {apos}{2}{apos}"),check_pk,data_feature[self.ds.dataLyrReferenceField.name()],self.ds.refLyr.name())
+            else:
+                warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "no Data-feature with PK {apos}{0}{apos} in layer {apos}{1}{apos}"),check_pk, self.ds.dataLyr.name())
+        else:
+            warning_msg = QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference- and Data-Layer required, check Point-on-Line-settings...")
+            self.my_dialogue.tbw_central.setCurrentIndex(1)
+
+        if warning_msg:
+            self.push_messages(warning_msg=warning_msg)
+            return False
+
+        return True
+
     def set_edit_pk(self, edit_pk, pan_to_feature: bool = True):
         """sets the editable feature
         set self.rs.edit_pk
         adds this PK to self.rs.selected_pks (Feature-Selection)
-        :param edit_pk: PK-value of show-layer
+        :param edit_pk: PK-value of Show-Layer
         :param pan_to_feature: True ➜ pan canvas False ➜ just select and highlight see PolEvt.set_edit_pk()
         """
         # Rev. 2023-05-03
-        warning_msg = ''
-        if self.cf.data_layer_complete and self.cf.reference_layer_complete:
+        if self.check_data_feature(edit_pk):
             data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-            if data_feature and data_feature.isValid():
-                ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
-                if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
-                    # no duplicates
-                    if not edit_pk in self.rs.selected_pks:
-                        self.rs.selected_pks.append(edit_pk)
+            ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
 
-                    self.rs.edit_pk = edit_pk
-                    self.my_dialogue.le_edit_data_pk.setText(str(edit_pk))
 
-                    self.ds.dataLyr.removeSelection()
-                    self.ds.dataLyr.select(data_feature.id())
+            # no duplicates
+            if not edit_pk in self.rs.selected_pks:
+                self.rs.selected_pks.append(edit_pk)
 
-                    self.my_dialogue.tbw_central.setCurrentIndex(0)
-                    # triggers s_edit_grb_toggle()
-                    self.my_dialogue.edit_grb.setChecked(1)
+            self.rs.edit_pk = edit_pk
+            self.my_dialogue.le_edit_data_pk.setText(str(edit_pk))
 
-                    # same in show-layer, if configured
-                    if self.cf.show_layer_complete:
-                        show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
-                        if show_feature and show_feature.isValid():
-                            self.ds.showLyr.removeSelection()
-                            self.ds.showLyr.select(show_feature.id())
+            self.ds.dataLyr.removeSelection()
+            self.ds.dataLyr.select(data_feature.id())
 
-                    # Show Measure-Data of this Feature in Dialog
-                    measure = data_feature[self.ds.dataLyrMeasureField.name()]
-                    self.rs.snapped_ref_fid = ref_feature.id()
-                    self.rs.current_measure = measure
-                    self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, ref_feature.id())
+            self.my_dialogue.tbw_central.setCurrentIndex(0)
+            # triggers s_edit_grb_toggle()
+            self.my_dialogue.edit_grb.setChecked(1)
 
-                    self.check_settings()
-                    self.dlg_refresh_measure_section()
-                    self.dlg_refresh_edit_section()
-                    self.dlg_refresh_feature_selection_section()
-                    self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-                    if pan_to_feature:
-                        self.pan_to_measure(ref_feature.id(), self.rs.current_measure)
-                    self.draw_measured_point(self.rs.snapped_ref_fid, measure)
-                    self.draw_edit_point(self.rs.snapped_ref_fid, measure)
-                    self.draw_reference_geom(self.rs.snapped_ref_fid)
-                else:
-                    warning_msg=self.tr(f"no reference-feature with ID '{data_feature[self.ds.dataLyrReferenceField.name()]}' in layer {self.ds.refLyr.name()}")
+            # same in Show-Layer, if configured
+            if self.cf.show_layer_complete:
+                show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
+                if show_feature and show_feature.isValid():
+                    self.ds.showLyr.removeSelection()
+                    self.ds.showLyr.select(show_feature.id())
 
-            else:
-                warning_msg=self.tr(f"no feature with ID '{edit_pk}' in layer {self.ds.dataLyr.name()}")
+            # Show Measure-Data of this Feature in Dialog
+            measure = data_feature[self.ds.dataLyrMeasureField.name()]
+            self.rs.snapped_ref_fid = ref_feature.id()
+            self.rs.current_measure = measure
+            self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, ref_feature.id())
 
-        self.push_messages(warning_msg=warning_msg)
+            self.check_settings()
+            self.dlg_refresh_measure_section()
+            self.dlg_refresh_edit_section()
+            self.dlg_refresh_feature_selection_section()
+            self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
+            if pan_to_feature:
+                self.pan_to_measure(ref_feature.id(), self.rs.current_measure)
+            self.draw_measured_point(self.rs.snapped_ref_fid, measure)
+            self.draw_edit_point(self.rs.snapped_ref_fid, measure)
+            self.draw_reference_geom(self.rs.snapped_ref_fid)
+
+
 
     def s_select_features(self, checked: bool):
         """Toggle tool_mode 'select_features' for selecting point-features from showLyr
@@ -1112,11 +1121,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 tool_mode = 'select_features'
             else:
                 tool_mode = 'measuring'
-                self.push_messages(warning_msg=self.tr(f"Missing requirements, reference-, data- and show-layer required..."))
+                self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
 
         self.check_settings(tool_mode)
         self.dlg_refresh_feature_selection_section()
-
 
     def s_clear_feature_selection(self):
         """remove selected point-features from QTableWidget"""
@@ -1140,7 +1148,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.check_settings()
             self.dlg_refresh_feature_selection_section()
         else:
-            self.push_messages(warning_msg=self.tr(f"Missing requirements, reference-, data- and show-layer required..."))
+            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
 
     def s_append_data_features(self):
         """Adds current selected Features from dataLyr to self.rs.selected_pks"""
@@ -1155,9 +1163,9 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 self.check_settings()
                 self.dlg_refresh_feature_selection_section()
             else:
-                self.push_messages(info_msg=self.tr(f"No selection in data-layer..."))
+                self.push_messages(info_msg=QtCore.QCoreApplication.translate('PolEvt', "No selection in Data-Layer..."))
         else:
-            self.push_messages(warning_msg=self.tr(f"Missing requirements, reference-, data- and show-layer required..."))
+            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
 
     def s_zoom_to_feature_selection(self):
         """Zooms canvas to feature-selection
@@ -1182,7 +1190,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
                 if data_feature and data_feature.isValid():
                     ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                         measure = data_feature[self.ds.dataLyrMeasureField.name()]
                         ref_feature_geom = ref_feature.geometry()
                         projected_point = ref_feature_geom.interpolate(measure)
@@ -1190,11 +1198,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             projected_point.transform(qgis.core.QgsCoordinateTransform(self.ds.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
 
                         if projected_point:
-                            left = min(left,projected_point.asPoint().x())
+                            left = min(left, projected_point.asPoint().x())
                             bottom = min(bottom, projected_point.asPoint().y())
                             right = max(right, projected_point.asPoint().x())
-                            top = max(top,projected_point.asPoint().y())
-
+                            top = max(top, projected_point.asPoint().y())
 
                             # projected_point ➜ QgsGeometry
                             data_fids.append(data_feature.id())
@@ -1219,12 +1226,11 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 self.iface.mapCanvas().zoomByFactor(1.1)
             elif left == right and bottom == top:
                 # single feature or all features with same calculated point ➜ pan
-                center_point = qgis.core.QgsPointXY(left,bottom)
+                center_point = qgis.core.QgsPointXY(left, bottom)
                 self.iface.mapCanvas().setCenter(center_point)
             else:
                 # no feature or no point calculable, left/top/right/bottom as initialized with +- sys.float_info.max
-                self.push_messages(warning_msg=self.tr(f"no extent calculable for these features"))
-
+                self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "no extent calculable for these features"))
 
     def s_append_show_features(self):
         """Adds current selected Features from showLyr to self.rs.selected_pks"""
@@ -1234,19 +1240,19 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             additional_features = qgis.core.QgsVectorLayerUtils.getValues(self.ds.showLyr, self.ds.showLyrBackReferenceField.name(), selectedOnly=True)[0]
             if len(additional_features):
                 if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-                    self.rs.selected_pks +=additional_features
+                    self.rs.selected_pks += additional_features
                 else:
                     self.rs.selected_pks = additional_features
 
                 self.check_settings()
                 self.dlg_refresh_feature_selection_section()
             else:
-                self.push_messages(info_msg=self.tr(f"No selection in show-layer..."))
+                self.push_messages(info_msg=QtCore.QCoreApplication.translate('PolEvt', "No selection in Show-Layer..."))
         else:
-            self.push_messages(warning_msg=self.tr(f"Missing requirements, reference-, data- and show-layer required..."))
+            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
 
     def s_update_feature(self):
-        """show feature-form for edit and save segment to data-layer"""
+        """Show feature-form for edit and save segment to Data-Layer"""
         # Rev. 2023-04-27
         try_it = True
         did_it = False
@@ -1255,16 +1261,17 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         info_msg = ''
         warning_msg = ''
         if self.cf.update_enabled and self.rs.edit_pk is not None:
-            # get current edit-values from runtime-settings, not from dialogue-widgets
-            data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, self.rs.edit_pk)
-            ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if data_feature and data_feature.isValid() and ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if self.check_data_feature(self.rs.edit_pk):
+                # get current edit-values from runtime-settings, not from dialogue-widgets
+                data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, self.rs.edit_pk)
+                ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
+
                 if self.ds.dataLyr.isEditable():
                     if self.ds.dataLyr.isModified():
                         dialog_result = QtWidgets.QMessageBox.question(
                             None,
                             f"LinearReferencing Update Feature ({gdp()})",
-                            self.tr(f"Layer '{self.ds.dataLyr.name()}' is editable!\n\n[Yes]        ➜ End edit session with save\n[No]         ➜ End edit session without save \n[Cancel]  ➜ Quit..."),
+                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "{div_pre_1}Layer {apos}{0}{apos} is editable!{div_ml_1}[Yes]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session with save{br}[No]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session without save{br}[Cancel]{nbsp}{arrow} Quit...{div_ml_2}{div_pre_2}"),self.ds.dataLyr.name()),
                             buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
                             defaultButton=QtWidgets.QMessageBox.Yes
                         )
@@ -1275,7 +1282,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             self.ds.dataLyr.rollBack()
                         else:
                             try_it = False
-                            info_msg = self.tr("Canceled by user...")
+                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
                     else:
                         self.ds.dataLyr.rollBack()
 
@@ -1296,39 +1303,37 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             update_ref_pk = data_feature[self.ds.dataLyrReferenceField.name()]
                             update_measure = data_feature[self.ds.dataLyrMeasureField.name()]
                             update_ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, update_ref_pk)
-                            # User could have changed feature-data in dialog (PK, reference-id, measure)
-                            # ➜ validity-check like "reference-id exists in refLyr?" "measure 0 ...referenced_line_length?"
-                            if update_ref_feature and update_ref_feature.isValid() and ref_feature.hasGeometry():
+                            # user could have changed feature-data in dialog (PK, Reference-id, measure)
+                            # ➜ validity-check like "Reference-id exists in refLyr?" "measure 0 ...referenced_line_length?"
+                            if update_ref_feature and update_ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
 
                                 if ref_feature.geometry().constGet().partCount() > 1:
-                                    warning_msg = self.tr(f"Referenced Linestring-Geometry '{self.rs.snapped_ref_fid}' in Layer '{self.ds.refLyr.name()}' is multi-part ({ref_feature.geometry().constGet().partCount()} parts), measured Point-on-Line-Feature may be invisible in Show-Layer")
+                                    warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Referenced linestring-geometry {apos}{0}{apos} in layer {apos}{1}{apos} is {2}-parted, Point-on-Line-feature not calculable"),self.rs.snapped_ref_fid, self.ds.refLyr.name(), ref_feature.geometry().constGet().partCount())
 
                                 if update_measure < 0 or update_measure > update_ref_feature.geometry().length():
-                                    info_msg = self.tr(f"measure {update_measure} truncated to range 0 ... {update_ref_feature.geometry().length()}")
-                                    data_feature[self.ds.dataLyrMeasureField.name()] = max(0,min(update_ref_feature.geometry().length(),update_measure))
+                                    info_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "measure {0} truncated to range 0 ... {1}"),update_measure, update_ref_feature.geometry().length())
+                                    data_feature[self.ds.dataLyrMeasureField.name()] = max(0, min(update_ref_feature.geometry().length(), update_measure))
 
                                 self.ds.dataLyr.updateFeature(data_feature)
                                 commit_result = self.ds.dataLyr.commitChanges()
                                 if commit_result:
                                     did_it = True
-                                    success_msg = self.tr(f"Feature with ID '{self.rs.edit_pk}' successfully updated in '{self.ds.dataLyr.name()}'...")
+                                    success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with ID {apos}{0}{apos} successfully updated in Data-Layer {apos}{1}{apos}..."),self.rs.edit_pk, self.ds.dataLyr.name())
                                 else:
                                     self.ds.dataLyr.rollBack()
                                     critical_msg = str(self.ds.dataLyr.commitErrors())
                             else:
                                 self.ds.dataLyr.rollBack()
-                                critical_msg = self.tr(f"Update feature failed, no reference-feature with PK '{update_ref_pk}' in layer '{self.ds.refLyr.name()}' ...")
+                                critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Update feature failed, no Reference-feature with PK {apos}{0}{apos} in Data-Layer {apos}{1}{apos} ..."),update_ref_pk, self.ds.refLyr.name())
                         else:
                             self.ds.dataLyr.rollBack()
-                            info_msg = self.tr("Canceled by user...")
+                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
 
                     except Exception as err:
                         self.ds.dataLyr.rollBack()
                         critical_msg = f"Exception '{err.__class__.__name__}' in {gdp()}: {err}"
-            else:
-                critical_msg = self.tr(f"Update feature failed, no feature '{self.rs.edit_pk}' in layer '{self.ds.dataLyr.name()}' or reference-feature '{self.rs.snapped_ref_fid}' in layer '{self.ds.refLyr.name()}' ...")
         else:
-            critical_msg = self.tr(f"Update feature failed, missing privileges in layer '{self.ds.dataLyr.name()}'...")
+            critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Update feature failed, missing privileges in Data-Layer {apos}{0}{apos}..."),self.ds.dataLyr.name())
 
         if did_it:
             self.vm_pt_edit.hide()
@@ -1342,11 +1347,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
             self.set_edit_pk(self.rs.edit_pk, False)
 
-
-        self.push_messages(success_msg,info_msg,warning_msg,critical_msg)
+        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
     def s_open_ref_form(self):
-        """opens the attribute-form for the reference-layer, draws self.rb_ref
+        """opens the attribute-form for the Reference-Layer, draws self.rb_ref
         fid comes from qcbn_snapped_ref_fid (QComboBoxN)"""
         # Rev. 2023-05-03
         if self.cf.reference_layer_defined:
@@ -1358,32 +1362,32 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.iface.openFeatureForm(self.ds.refLyr, ref_feature)
                     self.draw_reference_geom(ref_fid)
                 else:
-                    self.push_messages(warning_msg=self.tr(f"Feature with FID '{ref_fid}' in reference-layer '{self.ds.refLyr.name()}' not found or not valid"))
+                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with FID {apos}{0}{apos} in Reference-Layer {apos}{1}{apos} not found or not valid"),ref_fid, self.ds.refLyr.name()))
 
     def s_open_show_lyr_tbl(self):
-        """opens the show-layer-attribute-table"""
+        """opens the Show-Layer-attribute-table"""
         # Rev. 2023-05-03
         if self.cf.show_layer_defined:
             self.iface.showAttributeTable(self.ds.showLyr)
 
     def s_open_data_tbl(self):
-        """opens the data-layer-attribute-table """
+        """opens the Data-Layer-attribute-table """
         # Rev. 2023-05-03
         if self.cf.data_layer_defined:
             self.iface.showAttributeTable(self.ds.dataLyr)
 
     def s_open_ref_tbl(self):
-        """opens the reference-layer-attribute-table """
+        """opens the Reference-Layer-attribute-table """
         # Rev. 2023-05-03
         if self.cf.reference_layer_defined:
             self.iface.showAttributeTable(self.ds.refLyr)
 
     def s_define_ref_lyr_display_expression(self):
-        """opens the dialog for editing the displayExpression of reference-layer"""
+        """opens the dialog for editing the displayExpression of Reference-Layer"""
         # Rev. 2023-05-09
         if self.cf.reference_layer_defined:
             dlg = qgis.gui.QgsExpressionBuilderDialog(self.ds.refLyr, self.ds.refLyr.displayExpression())
-            dlg.setWindowTitle(f"Edit displayExpression for Reference-Layer '{self.ds.refLyr.name()}'")
+            dlg.setWindowTitle(qt_format(QtCore.QCoreApplication.translate('PolEvt', "Edit displayExpression for Reference-Layer {apos}{0}{apos}"),self.ds.refLyr.name()))
             exec_result = dlg.exec()
             if exec_result:
                 # expressionBuilder ➜ https://api.qgis.org/api/classQgsExpressionBuilderWidget.html
@@ -1392,50 +1396,50 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.check_settings()
                     self.dlg_refresh_reference_layer_section()
                     self.dlg_refresh_feature_selection_section()
-                    self.push_messages(success_msg=self.tr(f"Expression '{dlg.expressionText()}' valid and used as DisplayExpression for layer '{self.ds.refLyr.name()}'"))
+                    self.push_messages(success_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} valid and used as DisplayExpression for Reference-Layer {apos}{1}{apos}"),dlg.expressionText(), self.ds.refLyr.name()))
                 else:
-                    self.push_messages(warning_msg=self.tr(f"Expression '{dlg.expressionText()}' invalid and not used as DisplayExpression for layer '{self.ds.refLyr.name()}', please check syntax!"))
+                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} invalid and not used as DisplayExpression for Reference-Layer {apos}{1}{apos}, please check syntax!"),dlg.expressionText(), self.ds.refLyr.name()))
         else:
             # should not happen, because QPushButton disabled
-            self.push_messages(warning_msg=self.tr("No reference-layer defined yet"))
+            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No Reference-Layer defined yet"))
 
     def s_define_data_lyr_display_expression(self):
-        """opens the dialog for editing the displayExpression of data-layer"""
+        """opens the dialog for editing the displayExpression of Data-Layer"""
         # Rev. 2023-05-09
         if self.cf.data_layer_defined:
             dlg = qgis.gui.QgsExpressionBuilderDialog(self.ds.dataLyr, self.ds.dataLyr.displayExpression())
-            dlg.setWindowTitle(f"Edit displayExpression for Data-Layer '{self.ds.dataLyr.name()}'")
+            dlg.setWindowTitle(qt_format(QtCore.QCoreApplication.translate('PolEvt', "Edit displayExpression for Data-Layer {apos}{0}{apos}"),self.ds.dataLyr.name()))
             exec_result = dlg.exec()
             if exec_result:
                 # expressionBuilder ➜ https://api.qgis.org/api/classQgsExpressionBuilderWidget.html
                 if dlg.expressionBuilder().isExpressionValid():
                     self.ds.dataLyr.setDisplayExpression(dlg.expressionText())
                     # self.dlg_refresh_feature_selection_section() ➜ triggered automatically
-                    self.push_messages(success_msg=self.tr(f"Expression '{dlg.expressionText()}' valid and used as DisplayExpression for layer '{self.ds.dataLyr.name()}'"))
+                    self.push_messages(success_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} valid and used as DisplayExpression for Data-Layer {apos}{1}{apos}"),dlg.expressionText(), self.ds.dataLyr.name()))
                 else:
-                    self.push_messages(warning_msg=self.tr(f"Expression '{dlg.expressionText()}' invalid and not used as DisplayExpression for layer '{self.ds.dataLyr.name()}', please check syntax!"))
+                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} invalid and not used as DisplayExpression for Data-Layer {apos}{1}{apos}, please check syntax!"),dlg.expressionText(), self.ds.dataLyr.name()))
         else:
             # should not happen, because QPushButton disabled
-            self.push_messages(warning_msg=self.tr("No data-layer defined yet"))
+            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No Data-Layer defined yet"))
 
     def s_define_show_lyr_display_expression(self):
-        """opens the dialog for editing the displayExpression of show-layer
+        """opens the dialog for editing the displayExpression of Show-Layer
         see connect_show_layer"""
         # Rev. 2023-05-09
         if self.cf.show_layer_defined:
             dlg = qgis.gui.QgsExpressionBuilderDialog(self.ds.showLyr, self.ds.showLyr.displayExpression())
-            dlg.setWindowTitle(f"Edit displayExpression for Show-Layer '{self.ds.showLyr.name()}'")
+            dlg.setWindowTitle(qt_format(QtCore.QCoreApplication.translate('PolEvt', "Edit displayExpression for Show-Layer {apos}{0}{apos}"),self.ds.showLyr.name()))
             exec_result = dlg.exec()
             if exec_result:
                 # expressionBuilder ➜ https://api.qgis.org/api/classQgsExpressionBuilderWidget.html
                 if dlg.expressionBuilder().isExpressionValid():
                     self.ds.showLyr.setDisplayExpression(dlg.expressionText())
-                    self.push_messages(success_msg=self.tr(f"Expression '{dlg.expressionText()}' valid and used as DisplayExpression for layer '{self.ds.showLyr.name()}'"))
+                    self.push_messages(success_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} valid and used as DisplayExpression for Show-Layer {apos}{1}{apos}"),dlg.expressionText(), self.ds.showLyr.name()))
                 else:
-                    self.push_messages(warning_msg=self.tr(f"Expression '{dlg.expressionText()}' invalid and not used as DisplayExpression for layer '{self.ds.showLyr.name()}', please check syntax!"))
+                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} invalid and not used as DisplayExpression for Show-Layer {apos}{1}{apos}, please check syntax!"),dlg.expressionText(), self.ds.showLyr.name()))
         else:
             # should not happen, because QPushButton disabled
-            self.push_messages(warning_msg=self.tr("No show-layer defined yet"))
+            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No Show-Layer defined yet"))
 
     def s_measure_edited(self, measure: float) -> None:
         """Slot for valueChanged-Signal of the QDoubleSpinBox for measure, changed via user-input or spin-Buttons
@@ -1456,7 +1460,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
         if self.cf.reference_layer_defined and self.cf.measure_completed:
             ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 ref_feature_geom = ref_feature.geometry()
                 # Spinbox-Value > length of the geometry ?
                 # Should never happen, because the range is set to line-length
@@ -1472,7 +1476,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         # Rev. 2023-05-03
         if self.cf.measure_completed:
             ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 measure_fract = max(0, min(measure_fract, 1))
                 ref_feature_geom = ref_feature.geometry()
                 self.rs.current_measure = measure_fract * ref_feature_geom.length()
@@ -1480,14 +1484,14 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 self.draw_reference_geom(self.rs.snapped_ref_fid)
                 self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
 
-    def pan_to_measure(self,ref_fid:int, measure:float):
+    def pan_to_measure(self, ref_fid: int, measure: float):
         """pans canvas-extent to measured point
         :param ref_fid: FID of selected reference-line
         :param measure: measure along reference-line
         """
         if self.cf.reference_layer_defined:
             ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 ref_feature_geom = ref_feature.geometry()
                 projected_point = ref_feature_geom.interpolate(measure)
                 if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
@@ -1497,15 +1501,14 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.iface.mapCanvas().setCenter(projected_point.asPoint())
                     self.iface.mapCanvas().refresh()
 
-
-    def draw_edit_point(self,ref_fid:int, measure:float):
+    def draw_edit_point(self, ref_fid: int, measure: float):
         """draw vm_pt_edit
         :param ref_fid: FID of selected reference-line
         :param measure: measure along reference-line"""
         # Rev. 2023-06-03
         if self.cf.reference_layer_defined:
             ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 ref_feature_geom = ref_feature.geometry()
                 projected_point = ref_feature_geom.interpolate(measure)
                 if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
@@ -1514,7 +1517,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.vm_pt_edit.setCenter(projected_point.asPoint())
                     self.vm_pt_edit.show()
 
-    def draw_measured_point(self, ref_fid:int, measure:float):
+    def draw_measured_point(self, ref_fid: int, measure: float):
         """helper-function which shows vm_pt_measure and the reference-line-rubber-band
         recalculates and refreshes some widgets in dialog
         :param ref_fid: FID of selected reference-line
@@ -1523,7 +1526,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         # Rev. 2023-05-03
         if self.cf.reference_layer_defined:
             ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 ref_feature_geom = ref_feature.geometry()
                 projected_point = ref_feature_geom.interpolate(measure)
                 if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
@@ -1533,27 +1536,26 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.vm_pt_measure.setCenter(projected_point.asPoint())
                     self.vm_pt_measure.show()
 
-
-    def draw_reference_geom(self,ref_fid:int):
+    def draw_reference_geom(self, ref_fid: int):
         """draw the referenced line-geometry self.rb_ref
         :param ref_fid: FID of selected reference-line
         """
         if self.cf.reference_layer_defined:
             ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 self.rb_ref.setToGeometry(ref_feature.geometry(), self.ds.refLyr)
                 self.rb_ref.show()
             else:
-                self.push_messages(warning_msg=self.tr(f"Feature with fid '{ref_fid}' not found, not valid or without geometry"))
+                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with fid {apos}{0}{apos} not found, not valid or without geometry"),ref_fid))
 
-    def dlg_show_measure(self,ref_fid:int, measure:float):
+    def dlg_show_measure(self, ref_fid: int, measure: float):
         """refresh snap-coords and measure-results in dialogue
         :param ref_fid: FID of selected reference-line
         :param measure: measure along reference-line"""
         # Rev. 2023-06-03
         if self.my_dialogue and self.cf.reference_layer_defined:
             ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                 self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, ref_feature.id())
 
                 projected_point = ref_feature.geometry().interpolate(measure)
@@ -1573,12 +1575,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.show_snap_coords_in_dialogue(projected_point)
                     self.dlg_refresh_measure_section()
                 else:
-                    self.push_messages(warning_msg=f"Point with measure {measure} on reference-line with fid {ref_fid} could not be calculated, check values...")
-
-
+                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Point with measure {0} on reference-line with fid {apos}{1}{apos} could not be calculated, check values..."),measure, ref_fid))
 
     def s_change_data_layer_measure_field(self) -> None:
-        """change measure-field of data-layer in QComboBox"""
+        """change measure-field of Data-Layer in QComboBox"""
         # Rev. 2023-05-03
         self.rs.selected_pks = []
         self.rs.edit_pk = None
@@ -1587,25 +1587,26 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         if measure_field:
             self.ss.dataLyrMeasureFieldName = measure_field.name()
 
-
         self.check_settings()
+        self.refresh_data_layer_actions()
         self.dlg_refresh_edit_section()
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
     def s_change_show_layer_back_reference_field(self) -> None:
-        """change back-reference-Field of show-layer in QComboBox"""
+        """change Back-Reference-Field of Show-Layer in QComboBox"""
         # Rev. 2023-05-03
         self.ss.showLyrBackReferenceFieldName = None
         back_ref_field = self.my_dialogue.qcbn_show_layer_back_reference_field.currentData()
         if back_ref_field:
             self.ss.showLyrBackReferenceFieldName = back_ref_field.name()
         self.check_settings()
+        self.refresh_show_layer_actions()
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
     def s_change_data_layer_id_field(self) -> None:
-        """change reference-id-field of data-layer-PK-Field in QComboBox"""
+        """change Reference-id-field of Data-Layer-PK-Field in QComboBox"""
         # Rev. 2023-05-03
         self.rs.selected_pks = []
         self.rs.edit_pk = None
@@ -1615,13 +1616,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.ss.dataLyrIdFieldName = id_field.name()
 
         self.check_settings()
+        self.refresh_data_layer_actions()
         self.dlg_refresh_edit_section()
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
-
     def s_change_data_layer_reference_field(self) -> None:
-        """change reference-id-field of data-layer-reference-field in QComboBox"""
+        """change Reference-id-field of Data-Layer-Reference-field in QComboBox"""
         # Rev. 2023-05-03
         self.rs.selected_pks = []
         self.rs.edit_pk = None
@@ -1632,12 +1633,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 self.ss.dataLyrReferenceFieldName = ref_id_field.name()
 
         self.check_settings()
+        self.refresh_data_layer_actions()
         self.dlg_refresh_edit_section()
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
     def s_change_reference_layer(self) -> None:
-        """change reference-layer in QComboBox"""
+        """change Reference-Layer in QComboBox"""
         # Rev. 2023-05-03
         self.rs.selected_pks = []
         self.rs.edit_pk = None
@@ -1658,7 +1660,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
-
     def dlg_refresh_edit_section(self):
         """refreshes the edit-section in dialog"""
         # Rev. 2023-05-10
@@ -1666,19 +1667,20 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.my_dialogue.pbtn_insert_feature.setEnabled(self.cf.insert_enabled)
             self.my_dialogue.pbtn_update_feature.setEnabled(self.cf.update_enabled and self.rs.edit_pk is not None)
             self.my_dialogue.pbtn_delete_feature.setEnabled(self.cf.delete_enabled and self.rs.edit_pk is not None)
-
-
-
+            if self.rs.edit_pk is not None:
+                if not self.check_data_feature(self.rs.edit_pk):
+                    self.rs.edit_pk = None
+                    self.my_dialogue.le_edit_data_pk.clear()
 
     def connect_reference_layer(self, reference_layer) -> None:
-        """prepares reference-layer:
+        """prepares Reference-Layer:
         sets self.ss.refLyrId
         connects signals
         configures canvas-snap-settings
         """
         # Rev. 2023-05-03
 
-        # disconnect all previously connected reference-layer
+        # disconnect all previously connected Reference-Layer
         self.disconnect_reference_layers()
 
         prev_refLyrId = self.ss.refLyrId
@@ -1702,7 +1704,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
             # second: connect to new refLyr
             # displayExpressionChanged not triggered with configChanged
-            # afterCommitChanges ➜ refresh too, if the reference-Layer was edited
+            # afterCommitChanges ➜ refresh too, if the Reference-Layer was edited
 
             self.rs.reference_layer_connections.append(reference_layer.configChanged.connect(self.refresh_gui))
             self.rs.reference_layer_connections.append(reference_layer.displayExpressionChanged.connect(self.refresh_gui))
@@ -1726,7 +1728,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     enum_class = qgis.core.Qgis.WkbType
                     keys_by_value = {getattr(inspect_class, att_name): att_name for att_name in vars(inspect_class) if type(getattr(inspect_class, att_name)) == enum_class}
                     wkb_label = keys_by_value[reference_layer.dataProvider().wkbType()]
-                    self.push_messages(info_msg=self.tr(f"Reference-layer '{reference_layer.name()}' is of type '{wkb_label}', Point-on-Line-Features on multi-lines are not shown"))
+                    self.push_messages(info_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Reference-Layer {apos}{0}{apos} is of type {apos}{1}{apos}, Point-on-Line-features on multi-lines are not shown"),reference_layer.name(), wkb_label))
 
     def refresh_gui(self):
         """wrapper-slot for any layer-config-change, checks the settings and refreshes GUI (dialog, layer-actions, Snapping, canvas-graphics)"""
@@ -1742,19 +1744,15 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.connect_all_layers()
         self.refresh_canvas_graphics()
 
-
-
-
     def dlg_refresh_data_sections(self):
-        """wrapper-slot for any data-layer-change (update/insert/delete), refreshes parts of the dialog"""
+        """wrapper-slot for any Data-Layer-change (update/insert/delete), refreshes parts of the dialog"""
         # Rev. 2023-05-10
         self.dlg_refresh_measure_section()
         self.dlg_refresh_edit_section()
         self.dlg_refresh_feature_selection_section()
 
-
     def s_change_reference_layer_id_field(self) -> None:
-        """change reference-layer-join-field in QComboBox"""
+        """change Reference-Layer-join-field in QComboBox"""
         # Rev. 2023-05-03
         self.rs.selected_pks = []
         self.rs.edit_pk = None
@@ -1776,9 +1774,8 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
-
     def s_change_data_layer(self) -> None:
-        """change data-layer in QComboBox"""
+        """change Data-Layer in QComboBox"""
         # Rev. 2023-05-08
         self.rs.selected_pks = []
         self.rs.edit_pk = None
@@ -1789,17 +1786,16 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.ss.dataLyrMeasureFieldName = None
         self.ss.showLyrId = None
         self.ss.showLyrBackReferenceFieldName = None
-
         self.connect_data_layer(self.my_dialogue.qcbn_data_layer.currentData())
         self.check_settings()
+        self.refresh_data_layer_actions()
         self.dlg_refresh_edit_section()
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
     def disconnect_data_layers(self):
-        """disconnect all potential data-layers: disconnect signal/slot and removeAction """
+        """disconnect all potential Data-layers: disconnect signal/slot and removeAction """
         # Rev. 2023-05-22
-        disconnect_errors = []
         data_layers = tools.MyToolFunctions.get_data_layers()
         for layer_id in data_layers:
             layer = data_layers[layer_id]
@@ -1813,7 +1809,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     layer.disconnect(connection)
                 except Exception as e:
                     # "'method' object is not connected"
-                    disconnect_errors.append(f"'{layer.name()}' disconnect ➜ \"{e}\"")
+                    pass
 
             attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{layer.id()}"]
 
@@ -1823,11 +1819,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     reload_action.trigger()
 
         self.rs.data_layer_connections = []
-        if disconnect_errors:
-            print(disconnect_errors)
+
 
     def disconnect_reference_layers(self):
-        """disconnect all potential reference-layers: disconnect signal/slot"""
+        """disconnect all potential Reference-layers: disconnect signal/slot"""
         # Rev. 2023-05-22
         disconnect_errors = []
         linestring_layers = tools.MyToolFunctions.get_linestring_layers()
@@ -1843,8 +1838,31 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.rs.reference_layer_connections = []
 
         if disconnect_errors:
-            print(disconnect_errors)
+            #print(disconnect_errors)
+            pass
 
+    def disconnect_show_layer(self):
+        """disconnect currently connected Show-Layer: disconnect signal/slot and removeAction """
+        # Rev. 2023-05-22
+        if self.ds.showLyr:
+
+            action_list = [action for action in self.ds.showLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
+            for action in action_list:
+                self.ds.showLyr.actions().removeAction(action.id())
+
+            for connection in self.rs.show_layer_connections:
+                try:
+                    self.ds.showLyr.disconnect(connection)
+                except Exception as e:
+                    # "'method' object is not connected"
+                    pass
+
+            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.showLyr.id()}"]
+
+            for at_wdg in attribute_table_widgets:
+                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
+                if reload_action:
+                    reload_action.trigger()
 
     def disconnect_show_layers(self):
         """disconnect all potential show-layers: disconnect signal/slot and removeAction """
@@ -1874,7 +1892,8 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
         self.rs.show_layer_connections = []
         if disconnect_errors:
-            print(disconnect_errors)
+            #print(disconnect_errors)
+            pass
 
     def disconnect_all_layers(self):
         """remove Plugin-Layer-Actions from Vector-Layers
@@ -1889,7 +1908,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.disconnect_reference_layers()
         self.disconnect_show_layers()
 
-
     def connect_all_layers(self):
         if self.ds.dataLyr:
             self.connect_data_layer(self.ds.dataLyr)
@@ -1900,8 +1918,81 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         if self.ds.showLyr:
             self.connect_show_layer(self.ds.showLyr)
 
-    def connect_data_layer(self,data_layer) -> None:
-        """prepares data-layer:
+    def refresh_data_layer_actions(self):
+        """refreshes the action-buttons in Data-Layer"""
+        if self.ds.dataLyr is not None:
+            action_list = [action for action in self.ds.dataLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
+            for action in action_list:
+                self.ds.dataLyr.actions().removeAction(action.id())
+
+            if self.cf.data_layer_complete:
+                action_dict = {action.id(): action for action in self.ds.dataLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]}
+                if not self._lyr_act_id_1 in action_dict:
+                    data_layer_s_h_action = qgis.core.QgsAction(
+                        self._lyr_act_id_1,
+                        qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
+                        'Select + Highlight',
+                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',False)",
+                        ':icons/mIconSelected.svg',
+                        False,
+                        '',
+                        {'Feature'},
+                        ''
+                    )
+                    self.ds.dataLyr.actions().addAction(data_layer_s_h_action)
+                if not self._lyr_act_id_2 in action_dict:
+                    data_layer_s_h_p_action = qgis.core.QgsAction(
+                        self._lyr_act_id_2,
+                        qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
+                        'Select + Highlight + Pan',
+                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',True)",
+                        ':icons/mActionPanToSelected.svg',
+                        False,
+                        '',
+                        {'Feature'},
+                        ''
+                    )
+
+                    self.ds.dataLyr.actions().addAction(data_layer_s_h_p_action)
+
+            atc = self.ds.dataLyr.attributeTableConfig()
+            if not atc.actionWidgetVisible():
+                # qgis.core.QgsAttributeTableConfig.ButtonList / qgis.core.QgsAttributeTableConfig.DropDown
+                atc.setActionWidgetStyle(qgis.core.QgsAttributeTableConfig.ButtonList)
+                atc.setActionWidgetVisible(True)
+                self.ds.dataLyr.setAttributeTableConfig(atc)
+
+            # tricky: get all associated opened attribute-tables for this Layer and refresh their contents to show the new actions
+            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.dataLyr.id()}"]
+
+            for at_wdg in attribute_table_widgets:
+                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
+                if reload_action:
+                    reload_action.trigger()
+
+    def disconnect_data_layer(self):
+        """disconnects currently registered Data-Layer"""
+        if self.ds.dataLyr:
+            action_list = [action for action in self.ds.dataLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
+            for action in action_list:
+                self.ds.dataLyr.actions().removeAction(action.id())
+
+            for connection in self.rs.data_layer_connections:
+                try:
+                    self.ds.dataLyr.disconnect(connection)
+                except Exception as e:
+                    # "'method' object is not connected"
+                    pass
+
+            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.dataLyr.id()}"]
+
+            for at_wdg in attribute_table_widgets:
+                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
+                if reload_action:
+                    reload_action.trigger()
+
+    def connect_data_layer(self, data_layer) -> None:
+        """prepares Data-Layer:
         sets self.ss.dataLyrId
         adds actions
         connects signals
@@ -1914,21 +2005,20 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         warning_msg = ''
 
         # disconnect
-        self.disconnect_data_layers()
+        self.disconnect_data_layer()
 
         self.ss.dataLyrId = None
 
         if data_layer:
 
-            #https://doc.qt.io/qt-5/qmetaobject-connection.html
+            # https://doc.qt.io/qt-5/qmetaobject-connection.html
             self.rs.data_layer_connections.append(data_layer.configChanged.connect(self.refresh_gui))
             self.rs.data_layer_connections.append(data_layer.afterCommitChanges.connect(self.dlg_refresh_data_sections))
             self.rs.data_layer_connections.append(data_layer.displayExpressionChanged.connect(self.refresh_gui))
 
-
             storage_type = data_layer.dataProvider().storageType()
             if storage_type in ['XLSX', 'ODS']:
-                warning_msg=self.tr(f"Source-Format of chosen data-layer '{data_layer.name()}' is a file-based office-format (*.xlsx/*.odf), this not recommended...")
+                warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Source-Format of chosen Data-Layer {apos}{0}{apos} is a file-based office-format (*.xlsx/*.odf), supported, but not recommended..."),data_layer.name())
 
             caps = data_layer.dataProvider().capabilities()
             caps_result = []
@@ -1943,61 +2033,15 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
             if caps_result:
                 caps_string = ", ".join(caps_result)
-                warning_msg=self.tr(f"not allowed capabilities: {caps_string}\n ➜ Some editing options will not be available")
-
-            action_dict = {action.id(): action for action in data_layer.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]}
-            if not self._lyr_act_id_1 in action_dict:
-                data_layer_s_h_action = qgis.core.QgsAction(
-                    self._lyr_act_id_1,
-                    qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
-                    'Select + Highlight',
-                    "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',False)",
-                    ':icons/mIconSelected.svg',
-                    False,
-                    '',
-                    {'Feature'},
-                    ''
-                )
-                data_layer.actions().addAction(data_layer_s_h_action)
-            if not self._lyr_act_id_2 in action_dict:
-                data_layer_s_h_p_action = qgis.core.QgsAction(
-                    self._lyr_act_id_2,
-                    qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
-                    'Select + Highlight + Pan',
-                    "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',True)",
-                    ':icons/mActionPanToSelected.svg',
-                    False,
-                    '',
-                    {'Feature'},
-                    ''
-                )
-
-                data_layer.actions().addAction(data_layer_s_h_p_action)
-
-
-            atc = data_layer.attributeTableConfig()
-            if not atc.actionWidgetVisible():
-                # qgis.core.QgsAttributeTableConfig.ButtonList / qgis.core.QgsAttributeTableConfig.DropDown
-                atc.setActionWidgetStyle(qgis.core.QgsAttributeTableConfig.ButtonList)
-                atc.setActionWidgetVisible(True)
-                data_layer.setAttributeTableConfig(atc)
-
-
-            # tricky: get all associated opened attribute-tables for this Layer and refresh their contents to show the new actions
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{data_layer.id()}"]
-
-            for at_wdg in attribute_table_widgets:
-                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
-                if reload_action:
-                    reload_action.trigger()
+                warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Missing capabilities in Data-Layer:{br}{0}{br}{nbsp}{arrow}{nbsp}Some editing options will not be available"),caps_string)
 
             self.ss.dataLyrId = data_layer.id()
 
-            self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
-
+        self.refresh_data_layer_actions()
+        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
     def s_change_show_layer(self) -> None:
-        """change show-layer in QComboBox, items are filtered to suitable layer-types"""
+        """change Show-Layer in QComboBox, items are filtered to suitable layer-types"""
         # Rev. 2023-05-03
         self.ss.showLyrId = None
         self.ss.showLyrBackReferenceFieldName = None
@@ -2006,11 +2050,8 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.dlg_refresh_feature_selection_section()
         self.dlg_refresh_layer_settings_section()
 
-
-
-
-    def connect_show_layer(self,show_layer) -> None:
-        """prepares show-layer:
+    def connect_show_layer(self, show_layer) -> None:
+        """prepares Show-Layer:
         sets self.ss.showLyrId
         adds actions
         connects signals
@@ -2025,53 +2066,63 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.ss.showLyrId = show_layer.id()
             self.rs.show_layer_connections.append(show_layer.configChanged.connect(self.refresh_gui))
             self.rs.show_layer_connections.append(show_layer.displayExpressionChanged.connect(self.refresh_gui))
-
-            action_dict = {action.id(): action for action in show_layer.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]}
-
-            #if self.cf.show_layer_complete:
-            if not self._lyr_act_id_1 in action_dict:
-                show_layer_s_h_action = qgis.core.QgsAction(
-                    self._lyr_act_id_1,
-                    qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
-                    'Select + Highlight',
-                    "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',False)",
-                    ':icons/mIconSelected.svg',
-                    False,
-                    '',
-                    {'Feature'},
-                    ''
-                )
-                show_layer.actions().addAction(show_layer_s_h_action)
-            if not self._lyr_act_id_2 in action_dict:
-                show_layer_s_h_p_action = qgis.core.QgsAction(
-                    self._lyr_act_id_2,
-                    qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
-                    'Select + Highlight + Pan',
-                    "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',True)",
-                    ':icons/mActionPanToSelected.svg',
-                    False,
-                    '',
-                    {'Feature'},
-                    ''
-                )
-                show_layer.actions().addAction(show_layer_s_h_p_action)
+            self.ds.showLyr = show_layer
+            self.refresh_show_layer_actions()
 
 
-            atc = show_layer.attributeTableConfig()
+    def refresh_show_layer_actions(self):
+        """refreshes the action-buttons in Show-Layer"""
+        if self.ds.showLyr is not None:
+            action_list = [action for action in self.ds.showLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
+            for action in action_list:
+                self.ds.showLyr.actions().removeAction(action.id())
+
+
+            action_dict = {action.id(): action for action in self.ds.showLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]}
+
+            if self.cf.show_layer_complete:
+                # BackReference-Field necessary for these layer-actions
+                if not self._lyr_act_id_1 in action_dict:
+                    show_layer_s_h_action = qgis.core.QgsAction(
+                        self._lyr_act_id_1,
+                        qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
+                        'Select + Highlight',
+                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',False)",
+                        ':icons/mIconSelected.svg',
+                        False,
+                        '',
+                        {'Feature'},
+                        ''
+                    )
+                    self.ds.showLyr.actions().addAction(show_layer_s_h_action)
+                if not self._lyr_act_id_2 in action_dict:
+                    show_layer_s_h_p_action = qgis.core.QgsAction(
+                        self._lyr_act_id_2,
+                        qgis.core.Qgis.AttributeActionType.GenericPython,  # int 1
+                        'Select + Highlight + Pan',
+                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',True)",
+                        ':icons/mActionPanToSelected.svg',
+                        False,
+                        '',
+                        {'Feature'},
+                        ''
+                    )
+                    self.ds.showLyr.actions().addAction(show_layer_s_h_p_action)
+
+            atc = self.ds.showLyr.attributeTableConfig()
             if not atc.actionWidgetVisible():
                 # qgis.core.QgsAttributeTableConfig.ButtonList / qgis.core.QgsAttributeTableConfig.DropDown
                 atc.setActionWidgetStyle(qgis.core.QgsAttributeTableConfig.ButtonList)
                 atc.setActionWidgetVisible(True)
-                show_layer.setAttributeTableConfig(atc)
+                self.ds.showLyr.setAttributeTableConfig(atc)
 
             # tricky: get all associated opened attribute-tables for this Layer and refresh their contents to show the new actions
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{show_layer.id()}"]
+            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.showLyr.id()}"]
 
             for at_wdg in attribute_table_widgets:
                 reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
                 if reload_action:
                     reload_action.trigger()
-
 
     def show_map_coords_in_dialogue(self, point: qgis.core.QgsPointXY | qgis.core.QgsGeometry):
         """shows the point-coords (transformed cursor-position) in dialogue
@@ -2139,7 +2190,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 self.rs.current_measure = self.rs.last_measure = max(0, min(measure, ref_feature.geometry().length()))
                 self.show_measure_in_dialogue(self.rs.current_measure)
                 self.show_measure_fract_in_dialogue(self.rs.current_measure / ref_feature.geometry().length())
-                self.draw_measured_point(self.rs.snapped_ref_fid,self.rs.current_measure)
+                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
 
         elif self.rs.tool_mode == 'select_features':
 
@@ -2176,26 +2227,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.show_measure_in_dialogue(measure)
                     self.show_measure_fract_in_dialogue(measure / ref_feature.geometry().length())
 
-        elif self.rs.tool_mode == 'update_measure':
-            if self.cf.reference_layer_complete and self.cf.data_layer_complete and self.rs.edit_pk is not None:
-                snap_filter = tools.MyToolFunctions.OneFeatureFilter(self.ds.refLyr, self.rs.snapped_ref_fid)
-                m = self.iface.mapCanvas().snappingUtils().snapToMap(event.pos(), snap_filter)
-                self.snap_indicator.setMatch(m)
-                if self.snap_indicator.match().type():
-                    # always, because otherwise no snapping...
-                    snapped_point_xy = self.snap_indicator.match().point()
-                    ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
-                        snapped_point_geom = qgis.core.QgsGeometry.fromPointXY(snapped_point_xy)
-                        if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                            snapped_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
-                        self.rs.current_measure = ref_feature.geometry().lineLocatePoint(snapped_point_geom)
-                        self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                        self.draw_reference_geom(self.rs.snapped_ref_fid)
-                        self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-
-
     def dlg_refresh_reference_layer_section(self):
         """re-populates the QComboBoxN with the List of Reference-Layer-Features"""
         # Rev. 2023-05-03
@@ -2225,7 +2256,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
                 in_model.appendRow(items)
 
-
             self.my_dialogue.qcbn_snapped_ref_fid.set_model(in_model)
 
             if self.rs.snapped_ref_fid is not None:
@@ -2243,6 +2273,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.show_map_coords_in_dialogue(point_xy)
 
         if self.rs.tool_mode == 'move_point':
+            self.vm_pt_edit.hide()
             if self.cf.measure_completed:
                 ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
 
@@ -2252,23 +2283,23 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 # see https://qgis.org/pyqgis/master/core/QgsGeometry.html#qgis.core.QgsGeometry.closestSegmentWithContext
                 # returns tuple: (sqrDist, minDistPoint, nextVertexIndex, leftOrRightOfSegment)
                 point_on_line = ref_feature.geometry().closestSegmentWithContext(ref_projected_point_geom.asPoint())
-                #sqr_dist = point_on_line[0]
+                # sqr_dist = point_on_line[0]
                 # <0 left, >0 right, ==0 on the line
-                #side = point_on_line[3]
-                #abs_dist = math.sqrt(sqr_dist)
+                # side = point_on_line[3]
+                # abs_dist = math.sqrt(sqr_dist)
 
-                #offset = abs_dist * side * -1
+                # offset = abs_dist * side * -1
 
                 current_measure = ref_feature.geometry().lineLocatePoint(qgis.core.QgsGeometry.fromPointXY(point_on_line[1]))
 
                 delta = current_measure - self.rs.last_measure
-#
+                #
                 next_measure = self.rs.current_measure + delta
 
                 self.rs.current_measure = max(0, min(next_measure, ref_feature.geometry().length()))
                 self.show_measure_in_dialogue(self.rs.current_measure)
                 self.show_measure_fract_in_dialogue(self.rs.current_measure / ref_feature.geometry().length())
-                self.draw_measured_point(self.rs.snapped_ref_fid,self.rs.current_measure)
+                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
 
                 self.rs.last_measure = None
 
@@ -2305,7 +2336,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     for feature in self.ds.showLyr.getFeatures(request):
                         new_selected_pks.append(feature[self.ds.showLyrBackReferenceField.name()])
 
-
                     if len(new_selected_pks) > 0:
 
                         # like implemented in QGis-Select-Features:
@@ -2341,30 +2371,11 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                         self.ds.dataLyr.removeSelection()
                         self.ds.dataLyr.select(data_fids)
             else:
-                self.push_messages(warning_msg=self.tr("Missing requirements: No show-layer configured..."))
-
+                self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements: No Show-Layer configured..."))
             self.rb_selection_rect.hide()
             self.rs.mouse_down_point = None
             self.rs.mouse_up_point = None
             self.dlg_refresh_feature_selection_section()
-        elif self.rs.tool_mode == 'update_measure':
-            if self.cf.reference_layer_complete and self.cf.data_layer_complete and self.rs.edit_pk is not None:
-                snap_filter = tools.MyToolFunctions.OneFeatureFilter(self.ds.refLyr, self.rs.snapped_ref_fid)
-                m = self.iface.mapCanvas().snappingUtils().snapToMap(event.pos(), snap_filter)
-                self.snap_indicator.setMatch(m)
-                if self.snap_indicator.match().type():
-                    # always, because otherwise no snapping...
-                    snapped_point_xy = self.snap_indicator.match().point()
-                    ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
-                        snapped_point_geom = qgis.core.QgsGeometry.fromPointXY(snapped_point_xy)
-                        if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                            snapped_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
-                        self.rs.current_measure = ref_feature.geometry().lineLocatePoint(snapped_point_geom)
-                        self.check_settings('update_complete')
-                        self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                        self.draw_reference_geom(self.rs.snapped_ref_fid)
-                        self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
         elif self.rs.tool_mode == 'measuring':
             snap_filter = tools.MyToolFunctions.OneLayerFilter(self.ds.refLyr)
             m = self.iface.mapCanvas().snappingUtils().snapToMap(event.pos(), snap_filter)
@@ -2401,6 +2412,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
         if self.rs.tool_mode == 'before_move_point':
             if self.cf.measure_completed:
+                self.draw_edit_point(self.rs.snapped_ref_fid, self.rs.current_measure)
                 ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
                 ref_projected_point_geom = qgis.core.QgsGeometry.fromPointXY(point_xy)
                 ref_projected_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
@@ -2413,7 +2425,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
                 self.show_measure_in_dialogue(self.rs.current_measure)
                 self.show_measure_fract_in_dialogue(self.rs.current_measure / ref_feature.geometry().length())
-                self.draw_measured_point(self.rs.snapped_ref_fid,self.rs.current_measure)
+                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
 
                 self.check_settings('move_point')
 
@@ -2432,7 +2444,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         success_msg = ''
         info_msg = ''
         warning_msg = ''
-        # self.ds.refLyrPkField, necessary because the type of the created reference-field must fit to the referenced primary-key-field
+        # self.ds.refLyrPkField, necessary because the type of the created Reference-field must fit to the referenced primary-key-field
         if self.ds.refLyrPkField:
             # file-dialog for the GeoPackage
             dialog = QtWidgets.QFileDialog()
@@ -2442,7 +2454,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             dialog.setOption(QtWidgets.QFileDialog.DontConfirmOverwrite, True)
             dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptOpen)
             dialog.setNameFilter("geoPackage (*.gpkg)")
-            dialog.setWindowTitle(self.tr("LinearReferencing: Create Point-on-Line-Data-Layer"))
+            dialog.setWindowTitle(QtCore.QCoreApplication.translate('PolEvt', "LinearReferencing: Create Point-on-Line-Data-Layer"))
             dialog.setDefaultSuffix("gpkg")
             result = dialog.exec()
             filenames = dialog.selectedFiles()
@@ -2473,16 +2485,16 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 # unique name for the table/layer within project and GeoPackage:
                 table_name = tools.MyToolFunctions.get_unique_layer_name(used_layer_names, 'PointOnLine_Data_Layer_{curr_i}', '1')
 
-                table_name, ok = QtWidgets.QInputDialog.getText(None, self.tr(f"LinearReferencing ({gdp()})"), self.tr("Name for Table in GeoPackage:"), QtWidgets.QLineEdit.Normal, table_name)
+                table_name, ok = QtWidgets.QInputDialog.getText(None, f"LinearReferencing ({gdp()})", QtCore.QCoreApplication.translate('PolEvt', "Name for table in GeoPackage:"), QtWidgets.QLineEdit.Normal, table_name)
                 if not ok or not table_name:
-                    info_msg = self.tr("Canceled by user")
+                    info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user")
                     try_it = False
                 elif table_name in used_layer_names:
 
                     dialog_result = QtWidgets.QMessageBox.question(
                         None,
                         "LinearReferencing",
-                        self.tr(f"Table '{table_name}' already exists in {gpkg_path} !\n\nReplace?"),
+                        qt_format(QtCore.QCoreApplication.translate('PolEvt', "Replace table {apos}{0}{apos} in GeoPackage {apos}{1}{apos}?"),table_name, gpkg_path),
                         buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
                         defaultButton=QtWidgets.QMessageBox.Yes
                     )
@@ -2490,7 +2502,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     if dialog_result == QtWidgets.QMessageBox.Yes:
                         try_it = True
                     else:
-                        info_msg = self.tr("Canceled by user")
+                        info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user")
                         try_it = False
 
                 if try_it:
@@ -2523,8 +2535,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             data_lyr.setFieldConstraint(1, qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
                             data_lyr.setFieldConstraint(2, qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
 
-
-
                             self.ss.dataLyrId = data_lyr.id()
                             self.ss.dataLyrIdFieldName = data_lyr_fid_field.name()
                             self.ss.dataLyrReferenceFieldName = data_lyr_reference_field.name()
@@ -2536,23 +2546,22 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             self.dlg_refresh_feature_selection_section()
                             self.resume_measure()
 
-                            success_msg = self.tr(f"create table '{gpkg_path}'.'{table_name}' successful")
+                            success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "create table {apos}{0}{apos}.{apos}{1}{apos} successful"),gpkg_path, table_name)
                             did_it = True
                         else:
                             # if for example the GeoPackage is exclusively accessed by "DB Browser for SQLite"...
-                            critical_msg = self.tr(f"Error creating data-layer '{gpkg_path}'.'{table_name}', created layer not valid")
+                            critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Error creating Data-Layer {apos}{0}{apos}.{apos}{1}{apos}, created layer not valid"),gpkg_path, table_name)
 
                     else:
                         # perhaps write-permission?
-                        critical_msg = self.tr(f"Error creating data-layer '{gpkg_path}'.'{table_name}': {writer.errorMessage()}")
+                        critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Error creating Data-Layer {apos}{0}{apos}.{apos}{1}{apos}:{br}{2}"),gpkg_path, table_name, writer.errorMessage())
         else:
-            critical_msg = self.tr("missing requirements...")
-
+            critical_msg = QtCore.QCoreApplication.translate('PolEvt', "missing requirements...")
 
         self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
     def s_create_show_layer(self):
-        """create a virtual layer gcombining the data-layer and the reference-layer"""
+        """create a virtual layer gcombining the Data-Layer and the Reference-Layer"""
         # Rev. 2023-05-03
         try_it = True
         did_it = False
@@ -2566,12 +2575,12 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             layer_name = tools.MyToolFunctions.get_unique_layer_name(layer_names, "PointOnLine_Show_Layer_{curr_i}", '1')
 
             # unique name for the  virtual layer within project
-            layer_name, ok = QtWidgets.QInputDialog.getText(None, self.tr(f"LinearReferencing ({gdp()})"), self.tr("Name for Virtual Layer:"), QtWidgets.QLineEdit.Normal, layer_name)
+            layer_name, ok = QtWidgets.QInputDialog.getText(None, f"LinearReferencing ({gdp()})", QtCore.QCoreApplication.translate('PolEvt', "Name for virtual Show-Layer:"), QtWidgets.QLineEdit.Normal, layer_name)
             if ok and layer_name:
                 show_lyr_sql = "SELECT"
                 field_sql_lst = []
 
-                # only the necessary attributes of data-layer are included, the other come via join
+                # only the necessary attributes of Data-Layer are included, the other come via join
                 field_sql_lst.append(f" data_lyr.{self.ds.dataLyrIdField.name()} as \"{self.ds.dataLyrIdField.name()}\"")
                 field_sql_lst.append(f" data_lyr.{self.ds.dataLyrReferenceField.name()} as \"{self.ds.dataLyrReferenceField.name()}\"")
                 field_sql_lst.append(f" data_lyr.{self.ds.dataLyrMeasureField.name()} as \"{self.ds.dataLyrMeasureField.name()}\"")
@@ -2613,7 +2622,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
                 # &geometry=alias used in show_lyr_sql
                 # :1: ➜ point
-                # {epsg} ➜ same as reference-layer
+                # {epsg} ➜ same as Reference-Layer
                 # anyway under windows:
                 # the "Virtual Layer Dialog shows for "Geometry" allways "Autodetect" instead "Manually defined", so the whole
                 # "&geometry=point_geom:Point:25832"-part seems to be ignored
@@ -2670,15 +2679,14 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.resume_measure()
 
                     did_it = True
-                    success_msg = self.tr("Virtual layer created and added...")
+                    success_msg = QtCore.QCoreApplication.translate('PolEvt', "Virtual layer created and added...")
 
                 else:
-                    critical_msg = self.tr("Error creating virtual layer...")
+                    critical_msg = QtCore.QCoreApplication.translate('PolEvt', "Error creating virtual layer...")
             else:
-                info_msg = self.tr("Canceled by user")
+                info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user")
         else:
-            warning_msg = self.tr("first create or configure reference- and data-layer")
-
+            warning_msg = QtCore.QCoreApplication.translate('PolEvt', "Please create or configure Reference- and Data-Layer")
 
         self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
@@ -2704,9 +2712,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.dlg_refresh_measure_section()
         self.dlg_refresh_edit_section()
         self.my_dialogue.reset_measure_widgets()
+        self.iface.mapCanvas().setMapTool(self)
 
     def s_insert_feature(self):
-        """opens insert from with some prefilled contents, from which a new can be inserted to data-layer
+        """opens insert from with some prefilled contents, from which a new can be inserted to Data-Layer
         data from any currently selected self.rs.edit_pk is cloned"""
         # Rev. 2023-04-28
         try_it = True
@@ -2725,7 +2734,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     dialog_result = QtWidgets.QMessageBox.question(
                         None,
                         f"LinearReferencing Add Feature ({gdp()})",
-                        self.tr(f"Layer '{self.ds.dataLyr.name()}' is editable!\n\n[Yes]        ➜ End edit session with save\n[No]         ➜ End edit session without save \n[Cancel]  ➜ Quit..."),
+                        qt_format(QtCore.QCoreApplication.translate('PolEvt', "{div_pre_1}Layer {apos}{0}{apos} is editable!{div_ml_1}[Yes]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session with save{br}[No]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session without save{br}[Cancel]{nbsp}{arrow} Quit...{div_ml_2}{div_pre_2}"),self.ds.dataLyr.name()),
                         buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
                         defaultButton=QtWidgets.QMessageBox.Yes
                     )
@@ -2736,7 +2745,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                         self.ds.dataLyr.rollBack()
                     else:
                         try_it = False
-                        info_msg = self.tr("Canceled by user...")
+                        info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
                 else:
                     self.ds.dataLyr.rollBack()
 
@@ -2744,21 +2753,19 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 # Pre-Check the referenced Feature
                 ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
 
-                if ref_feature.isValid() and ref_feature.hasGeometry():
-                    #Feierabend
-
-
+                if ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
+                    # Feierabend
 
                     ref_layer_join_value = ref_feature[self.ds.refLyrPkField.name()]
                     # check, if there is a valuable ID, because self.ds.refLyrPkField can be any field in this layer
                     if ref_layer_join_value == '' or ref_layer_join_value is None or repr(ref_layer_join_value) == 'NULL':
-                        critical_msg = self.tr(f"Feature with ID {self.rs.snapped_ref_fid} in Layer '{self.ds.refLyr.name()}' has no value in ID-field {self.ds.refLyrPkField.name()}")
+                        critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with ID {0} in layer {apos}{1}{apos} has no value in ID-field {apos}{2}{apos}"),self.rs.snapped_ref_fid, self.ds.refLyr.name(), self.ds.refLyrPkField.name())
                         try_it = False
 
                     if ref_feature.geometry().constGet().partCount() > 1:
-                        warning_msg = self.tr(f"Referenced Linestring-Geometry '{self.rs.snapped_ref_fid}' in Layer '{self.ds.refLyr.name()}' is multi-part ({ref_feature.geometry().constGet().partCount()} parts), measured Point-on-Line-Feature may be invisible in Show-Layer")
+                        warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Geometry for feature ID {apos}{0}{apos} in Reference-Layer {apos}{1}{apos} is {2}-parted, Point-on-Line-geometry not calculable"),self.rs.snapped_ref_fid, self.ds.refLyr.name(), ref_feature.geometry().constGet().partCount())
                 else:
-                    critical_msg = self.tr(f"No reference-feature with ID {self.rs.snapped_ref_fid} in layer '{self.ds.refLyr.name()}'")
+                    critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "No Reference-feature with ID {apos}{0}{apos} in layer {apos}{1}{apos}"),self.rs.snapped_ref_fid, self.ds.refLyr.name())
                     try_it = False
 
                 if try_it:
@@ -2771,7 +2778,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                         for field in data_feature.fields():
                             data_feature[field.name()] = data_feature[field.name()]
 
-
                     data_feature[self.ds.dataLyrReferenceField.name()] = ref_layer_join_value
 
                     # if self.ds.refLyr.crs().isGeographic():
@@ -2780,7 +2786,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     #     measure = round(self.rs.current_measure, 2)
 
                     # caveat: measure never larger then reference-line-length
-                    measure = max(0,min(ref_feature.geometry().length(),self.rs.current_measure))
+                    measure = max(0, min(ref_feature.geometry().length(), self.rs.current_measure))
 
                     data_feature[self.ds.dataLyrMeasureField.name()] = measure
 
@@ -2805,40 +2811,40 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             insert_ref_pk = data_feature[self.ds.dataLyrReferenceField.name()]
                             insert_measure = data_feature[self.ds.dataLyrMeasureField.name()]
                             ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, insert_ref_pk)
-                            # User could have changed feature-data in dialog (PK, reference-id, measure)
-                            # ➜ validity-check like "reference-id exists in refLyr?" "measure 0 ...referenced_line_length?"
-                            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+                            # user could have changed feature-data in dialog (PK, Reference-id, measure)
+                            # ➜ validity-check like "Reference-id exists in refLyr?" "measure 0 ...referenced_line_length?"
+                            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
 
                                 if ref_feature.geometry().constGet().partCount() > 1:
-                                    warning_msg = self.tr(f"Referenced Linestring-Geometry '{insert_ref_pk}' in Layer '{self.ds.refLyr.name()}' is multi-part ({ref_feature.geometry().constGet().partCount()} parts), measured Point-on-Line-Feature may be invisible in Show-Layer")
+                                    warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Geometry {apos}{0}{apos} in Reference-Layer {apos}{1}{apos} is {2}-parted, Point-on-Line-Feature not calculable"),insert_ref_pk, self.ds.refLyr.name(), ref_feature.geometry().constGet().partCount())
 
                                 if insert_measure < 0 or insert_measure > ref_feature.geometry().length():
-                                    info_msg = self.tr(f"measure {insert_measure} truncated to range 0 ... {ref_feature.geometry().length()}")
-                                    data_feature[self.ds.dataLyrMeasureField.name()] = max(0,min(ref_feature.geometry().length(),insert_measure))
+                                    info_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "measure {0} truncated to range 0 ... {1}"),insert_measure, ref_feature.geometry().length())
+                                    data_feature[self.ds.dataLyrMeasureField.name()] = max(0, min(ref_feature.geometry().length(), insert_measure))
                                     self.ds.dataLyr.updateFeature(data_feature)
-                            
+
                                 commit_result = self.ds.dataLyr.commitChanges()
                                 if commit_result:
                                     used_pk = data_feature[self.ds.dataLyrIdField.name()]
 
                                     did_it = True
-                                    success_msg = self.tr(f"New feature with ID '{used_pk}' successfully added to '{self.ds.dataLyr.name()}'...")
+                                    success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "New feature with ID {apos}{0}{apos} successfully added to {apos}{1}{apos}..."),used_pk, self.ds.dataLyr.name())
                                 else:
                                     self.ds.dataLyr.rollBack()
                                     critical_msg = str(self.ds.dataLyr.commitErrors())
                             else:
                                 self.ds.dataLyr.rollBack()
-                                critical_msg = self.tr(f"No reference-feature with PK {insert_ref_pk}...")
+                                critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "No Reference-Layer-feature with PK {apos}{0}{apos}..."),insert_ref_pk)
                         else:
                             self.ds.dataLyr.rollBack()
-                            success_msg = self.tr(f"Canceled by user...")
+                            success_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
 
                     except Exception as err:
                         self.ds.dataLyr.rollBack()
                         critical_msg = str(err)
 
         else:
-            critical_msg = self.tr(f"Add feature failed, missing privileges in layer '{self.ds.dataLyr.name()}'...")
+            critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Add feature failed, missing privileges in Data-Layer {apos}{0}{apos}..."),self.ds.dataLyr.name())
 
         if did_it:
             if self.cf.show_layer_complete:
@@ -2847,15 +2853,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.ds.showLyr.triggerRepaint()
                 else:
                     self.iface.mapCanvas().refresh()
+
             self.set_edit_pk(used_pk, False)
 
         self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
 
-
-
-
     def s_delete_feature(self):
-        """deletes the current selected data-feature """
+        """deletes the current selected Data-feature """
         # Rev. 2023-04-27
         try_delete = True
         did_it = True
@@ -2866,14 +2870,14 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
         if self.rs.edit_pk is not None:
             if self.cf.delete_enabled:
-                data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, self.rs.edit_pk)
-                if data_feature:
+                if self.check_data_feature(self.rs.edit_pk):
+                    data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, self.rs.edit_pk)
                     if self.ds.dataLyr.isEditable():
                         if self.ds.dataLyr.isModified():
                             dialog_result = QtWidgets.QMessageBox.question(
                                 None,
                                 f"LinearReferencing Update Feature ({gdp()})",
-                                self.tr(f"Layer '{self.ds.dataLyr.name()}' is editable!\n\n[Yes]        ➜ End edit session with save\n[No]         ➜ End edit session without save \n[Cancel]  ➜ Quit..."),
+                                qt_format(QtCore.QCoreApplication.translate('PolEvt', "{div_pre_1}Layer {apos}{0}{apos} is editable!{div_ml_1}[Yes]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session with save{br}[No]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session without save{br}[Cancel]{nbsp}{arrow} Quit...{div_ml_2}{div_pre_2}"),self.ds.dataLyr.name()),
                                 buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
                                 defaultButton=QtWidgets.QMessageBox.Yes
                             )
@@ -2885,7 +2889,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             else:
                                 try_delete &= False
                                 did_it = False
-                                info_msg = self.tr("Canceled by user...")
+                                info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
                         else:
                             self.ds.dataLyr.rollBack()
 
@@ -2894,7 +2898,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                         dialog_result = QtWidgets.QMessageBox.question(
                             None,
                             f"LinearReferencing ({gdp()})",
-                            self.tr(f"Delete Feature with id '{self.rs.edit_pk}' from layer '{self.ds.dataLyr.name()}'?"),
+                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "Delete feature with ID {apos}{0}{apos} from Data-Layer {apos}{1}{apos}?"),self.rs.edit_pk, self.ds.dataLyr.name()),
                             buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                             defaultButton=QtWidgets.QMessageBox.Yes
                         )
@@ -2905,7 +2909,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                                 commit_result = self.ds.dataLyr.commitChanges()
                                 if commit_result:
                                     did_it = True
-                                    success_msg = self.tr(f"Feature with ID '{self.rs.edit_pk}' successfully deleted in '{self.ds.dataLyr.name()}'...")
+                                    success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with ID {apos}{0}{apos} successfully deleted in Data-Layer {apos}{1}{apos}..."),self.rs.edit_pk, self.ds.dataLyr.name())
                                 else:
                                     self.ds.dataLyr.rollBack()
                                     did_it = False
@@ -2918,16 +2922,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                         else:
                             self.ds.dataLyr.rollBack()
                             did_it = False
-                            info_msg = self.tr("Canceled by user...")
-                else:
-                    did_it = False
-                    warning_msg = self.tr(f"Delete feature failed, no feature '{self.rs.edit_pk}' in layer '{self.ds.dataLyr.name()}'...")
+                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
             else:
                 did_it = False
-                critical_msg = self.tr(f"Delete feature failed, missing privileges in layer '{self.ds.dataLyr.name()}'...")
+                critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Delete feature failed, missing privileges in layer {apos}{0}{apos}..."),self.ds.dataLyr.name())
         else:
             did_it = False
-            warning_msg = self.tr(f"Delete feature failed, no feature selected...")
+            warning_msg = QtCore.QCoreApplication.translate('PolEvt', "Delete feature failed, no feature selected...")
 
         if did_it:
             if self.rs.edit_pk in self.rs.selected_pks:
@@ -2991,8 +2992,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 qgis.core.QgsProject.instance().mapLayer(self.ss._showLyrId).fields().indexOf(self.ss._showLyrBackReferenceFieldName) >= 0
         )
 
-
-
         # all or nothing
         # access via setter of the properties to set the project "dirty"
         if not reference_layer_complete:
@@ -3009,17 +3008,14 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.ss._showLyrId = None
             self.ss._showLyrBackReferenceFieldName = None
 
-
-
-    def check_settings(self,tool_mode:str = None):
+    def check_settings(self, tool_mode: str = None):
         """ restores self.ds from self.ss, checks the current configuration
         :param tool_mode: checks the settings for this tool-mode and set self.rs.tool_mode, if settings are sufficient. If None, self.rs.tool_mode is used
         """
         # Rev. 2023-05-03
 
-
         if tool_mode and tool_mode not in self.tool_modes:
-            self.push_messages(warning_msg=self.tr(f"tool_mode '{tool_mode}' not implemented..."))
+            self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "tool_mode {apos}{0}{apos} not implemented..."),tool_mode))
             tool_mode = None
 
         if not tool_mode:
@@ -3051,15 +3047,12 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         linestring_layers = tools.MyToolFunctions.get_linestring_layers()
         point_layers = tools.MyToolFunctions.get_point_layers()
 
-
         # convenience for the basic requisite:
         # if not set so far: take the topmost linestring-layer
         if not self.ss.refLyrId or self.ss.refLyrId not in linestring_layers:
             if linestring_layers:
                 new_ref_lyer = list(linestring_layers.values()).pop()
                 self.connect_reference_layer(new_ref_lyer)
-
-
 
         if self.ss.refLyrId and self.ss.refLyrId in linestring_layers:
             self.ds.refLyr = linestring_layers[self.ss.refLyrId]
@@ -3119,8 +3112,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
                 if not (ref_feature and ref_feature.isValid() and ref_feature.hasGeometry()):
                     self.rs.snapped_ref_fid = None
-                    # multiple reasons possible: other reference-layer configured, filter applied, records deleted, id's changed...
-                    # self.push_messages(warning_msg=self.tr(f"selected line-feature '{self.rs.snapped_ref_fid}' in layer '{self.ds.refLyr.name()}' not found or not valid..."))
             else:
                 self.rs.snapped_ref_fid = None
 
@@ -3133,11 +3124,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 if data_feature and data_feature.isValid():
                     ref_id = data_feature[self.ss.dataLyrReferenceFieldName]
                     ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, ref_id)
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                         checked_edit_pk = self.rs.edit_pk
 
         self.rs.edit_pk = checked_edit_pk
-
 
         # make unique
         self.rs.selected_pks = list(dict.fromkeys(self.rs.selected_pks))
@@ -3151,7 +3141,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 if data_feature and data_feature.isValid():
                     ref_id = data_feature[self.ss.dataLyrReferenceFieldName]
                     ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, ref_id)
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                         checked_selected_pks.append(pk)
 
         self.rs.selected_pks = checked_selected_pks
@@ -3162,7 +3152,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 tool_mode = 'measuring'
             else:
                 tool_mode = 'disabled'
-        elif tool_mode in ['measuring', 'after_measure','before_move_point','move_point']:
+        elif tool_mode in ['measuring', 'after_measure', 'before_move_point', 'move_point']:
             if not self.cf.reference_layer_defined:
                 tool_mode = 'disabled'
         elif tool_mode in ['select_features']:
@@ -3195,8 +3185,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 (self.ds.dataLyr.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.DeleteFeatures)
         )
 
-
-
         # see https://doc.qt.io/qt-5/qt.html#CursorShape-enum
         if type(self.iface.mapCanvas().mapTool()) == PolEvt:
             if tool_mode in ['measuring', 'after_measure', 'select_features']:
@@ -3207,11 +3195,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 self.iface.mapCanvas().setCursor(QtCore.Qt.ClosedHandCursor)
             else:
                 self.iface.mapCanvas().setCursor(QtCore.Qt.ArrowCursor)
-
-        if 'LinearReferencing' in qgis.utils.plugins:
-            # re-trigger the MapTool-Action, useful f.e. if the pan-Tool was selected meanwhile
-            if type(self.iface.mapCanvas().mapTool()) != PolEvt and self.my_dialogue is not None and self.my_dialogue.isVisible():
-                qgis.utils.plugins['LinearReferencing'].qact_PolEvt.trigger()
 
         self.rs.tool_mode = tool_mode
         # show Toolmode in status_bar
@@ -3259,7 +3242,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             for widget in block_widgets:
                 widget.blockSignals(False)
 
-
     def dlg_refresh_layer_settings_section(self):
         """refreshes the settings-part in dialog"""
         # Rev. 2023-05-10
@@ -3280,13 +3262,10 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 widget.blockSignals(True)
                 widget.clear()
 
-
-
             linestring_layers = tools.MyToolFunctions.get_linestring_layers()
             pk_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong, QtCore.QVariant.String]
             integer_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong]
             numeric_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong, QtCore.QVariant.Double]
-
 
             # refresh Settings Layers and Fields...
             model = QtGui.QStandardItemModel(0, 3)
@@ -3312,7 +3291,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.my_dialogue.qcbn_reference_layer.set_model(model)
             if self.ds.refLyr:
                 self.my_dialogue.qcbn_reference_layer.select_by_value(0, 256, self.ds.refLyr)
-                # reference-layer is selected, now select the Id-Field
+                # Reference-Layer is selected, now select the Id-Field
                 model = QtGui.QStandardItemModel(0, 3)
                 idx = 0
                 for field in self.ds.refLyr.dataProvider().fields():
@@ -3415,7 +3394,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                                 for field in self.ds.dataLyr.dataProvider().fields():
                                     name_item = QtGui.QStandardItem(field.name())
                                     name_item.setData(field, 256)
-                                    # numerical, but no PK and not one of the almost selected fields. Can a double-value be used as PK or reference-key...?
+                                    # numerical, but no PK and not one of the almost selected fields. Can a double-value be used as PK or Reference-key...?
                                     name_item.setEnabled(
                                         field.type() in numeric_field_types and
                                         field != self.ds.dataLyrIdField and
@@ -3488,7 +3467,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                                         for field in self.ds.showLyr.dataProvider().fields():
                                             name_item = QtGui.QStandardItem(field.name())
                                             name_item.setData(field, 256)
-                                            # numerical, but no PK and not one of the almost selected fields. Can a double-value be used as PK or reference-key...?
+                                            # numerical, but no PK and not one of the almost selected fields. Can a double-value be used as PK or Reference-key...?
                                             name_item.setEnabled(
                                                 (self.ds.dataLyrIdField.type() in integer_field_types and field.type() in integer_field_types) or
                                                 field.type() == self.ds.dataLyrIdField.type()
@@ -3518,7 +3497,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.my_dialogue.pb_call_show_disp_exp_dlg.setEnabled(self.cf.show_layer_defined)
             self.my_dialogue.pbtn_create_show_layer.setEnabled(self.cf.reference_layer_complete and self.cf.data_layer_complete)
             self.my_dialogue.pbtn_create_data_layer.setEnabled(self.cf.reference_layer_complete)
-
 
     def dlg_refresh_measure_section(self):
         """refresh measure-part in dialog: Measure-Tab, Measure-Group-Box, without reference_layer_section"""
@@ -3581,11 +3559,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 else:
                     self.my_dialogue.qcbn_snapped_ref_fid.clear_selection()
 
-
-
-
-
-
     def dlg_refresh_stored_settings_section(self):
         """re-populates the list with the stored Configurations in the dialog"""
         # Rev. 2023-05-08
@@ -3599,9 +3572,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qlwi.setText(setting_label)
                     qlwi.setData(256, setting_label)
                     self.my_dialogue.lw_stored_settings.addItem(qlwi)
-
-
-
 
     def dlg_refresh_feature_selection_section(self):
         """refreshes the Feature-Selection-List and buttons in dialog"""
@@ -3618,7 +3588,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.my_dialogue.qtw_selected_pks.setColumnCount(0)
             self.my_dialogue.qtw_selected_pks.horizontalHeader().setVisible(False)
 
-            # QTableWidget with selected edit-PKs, show-layer not necessary, but taken into account
+            # QTableWidget with selected edit-PKs, Show-Layer not necessary, but taken into account
             # signal/slot see:
             # self.my_dialogue.qtw_selected_pks.itemPressed.connect(self.qtw_item_pressed)
             if self.cf.reference_layer_complete and self.cf.data_layer_complete and len(self.rs.selected_pks) > 0:
@@ -3626,20 +3596,21 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                 edit_features = {}
                 # check self.rs.selected_pks: iterate through List of PKs and query features
                 for edit_pk in self.rs.selected_pks:
-                    data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-                    if data_feature and data_feature.isValid():
-                        ref_id = data_feature[self.ss.dataLyrReferenceFieldName]
-                        ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, ref_id)
-                        if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry():
+                    if self.check_data_feature(edit_pk):
+                        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
+                        if data_feature and data_feature.isValid():
+                            ref_id = data_feature[self.ss.dataLyrReferenceFieldName]
+                            ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, ref_id)
+                            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
 
-                            if self.cf.show_layer_complete:
-                                show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
-                                if show_feature and show_feature.isValid():
-                                    edit_features[edit_pk] = [data_feature, ref_feature, show_feature]
+                                if self.cf.show_layer_complete:
+                                    show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
+                                    if show_feature and show_feature.isValid():
+                                        edit_features[edit_pk] = [data_feature, ref_feature, show_feature]
+                                    else:
+                                        edit_features[edit_pk] = [data_feature, ref_feature, None]
                                 else:
                                     edit_features[edit_pk] = [data_feature, ref_feature, None]
-                            else:
-                                edit_features[edit_pk] = [data_feature, ref_feature, None]
                 self.rs.selected_pks = list(edit_features.keys())
 
                 self.my_dialogue.qtw_selected_pks.horizontalHeader().setVisible(True)
@@ -3763,7 +3734,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qtb = QtWidgets.QToolButton()
                     qtb.setIcon(remove_icon)
                     qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(self.tr("Remove Feature from Selection"))
+                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Remove feature from selection"))
                     qtb.clicked.connect(self.s_remove_from_feature_selection)
                     qtb.setProperty("edit_pk", edit_pk)
                     qtb.setFixedSize(QtCore.QSize(20, 20))
@@ -3772,7 +3743,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qtb = QtWidgets.QToolButton()
                     qtb.setIcon(highlight_icon)
                     qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(self.tr("Highlight Feature and Select for Edit"))
+                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Highlight feature and select for edit"))
                     qtb.clicked.connect(self.s_highlight_edit_pk)
                     qtb.setProperty("edit_pk", edit_pk)
                     qtb.setFixedSize(QtCore.QSize(20, 20))
@@ -3781,7 +3752,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qtb = QtWidgets.QToolButton()
                     qtb.setIcon(pan_icon)
                     qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(self.tr("Pan to Feature and Select for Edit"))
+                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Pan to feature and select for edit"))
                     qtb.clicked.connect(self.s_pan_edit_pk)
                     qtb.setProperty("edit_pk", edit_pk)
                     qtb.setFixedSize(QtCore.QSize(20, 20))
@@ -3790,7 +3761,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qtb = QtWidgets.QToolButton()
                     qtb.setIcon(identify_icon)
                     qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(self.tr("Show Feature-Form"))
+                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Show feature-form"))
                     qtb.clicked.connect(self.s_open_data_form)
                     qtb.setProperty("edit_pk", edit_pk)
                     qtb.setFixedSize(QtCore.QSize(20, 20))
@@ -3801,7 +3772,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     cc += 1
 
                     # Reference-Layer use expression and append ID, if not contained in expression
-                    item = tools.MyQtWidgets.QTableWidgetItemMultipleSort(256,257)
+                    item = tools.MyQtWidgets.QTableWidgetItemMultipleSort(256, 257)
                     item.setData(256, ref_label)
                     item.setData(257, data_measure)
                     item.setText(f"{ref_label} {data_measure_rd}")
@@ -3817,7 +3788,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qtb = QtWidgets.QToolButton()
                     qtb.setIcon(highlight_icon)
                     qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(self.tr("Highlight Reference-Feature"))
+                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Highlight reference-feature"))
                     qtb.clicked.connect(self.s_highlight_ref_feature_by_edit_pk)
                     qtb.setProperty("edit_pk", edit_pk)
                     qtb.setFixedSize(QtCore.QSize(20, 20))
@@ -3826,7 +3797,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qtb = QtWidgets.QToolButton()
                     qtb.setIcon(pan_icon)
                     qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(self.tr("Zoom to Reference-Feature"))
+                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Zoom to reference-feature"))
                     qtb.clicked.connect(self.s_zoom_ref_feature_by_edit_pk)
                     qtb.setProperty("edit_pk", edit_pk)
                     qtb.setFixedSize(QtCore.QSize(20, 20))
@@ -3835,14 +3806,13 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     qtb = QtWidgets.QToolButton()
                     qtb.setIcon(identify_icon)
                     qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(self.tr("Show Reference-Feature-Form"))
+                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Show reference-feature-attribute-form"))
                     qtb.clicked.connect(self.s_open_ref_form_by_edit_pk)
                     qtb.setProperty("edit_pk", edit_pk)
                     qtb.setFixedSize(QtCore.QSize(20, 20))
                     c_wdg.layout().addWidget(qtb)
 
                     self.my_dialogue.qtw_selected_pks.setCellWidget(rc, cc, c_wdg)
-
 
                     if self.cf.show_layer_complete:
                         cc += 1
@@ -3862,7 +3832,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                         qtb = QtWidgets.QToolButton()
                         qtb.setIcon(identify_icon)
                         qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                        qtb.setToolTip(self.tr("Show Show-Feature-Form"))
+                        qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Open attribute-form for Show-Layer"))
                         qtb.clicked.connect(self.s_open_show_form_by_edit_pk)
                         qtb.setProperty("edit_pk", edit_pk)
                         qtb.setFixedSize(QtCore.QSize(20, 20))
@@ -3886,7 +3856,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
                 # restore previous sort-settings
                 self.my_dialogue.qtw_selected_pks.sortItems(prev_sort_col_idx, prev_sort_order)
-
 
             self.my_dialogue.pbtn_select_features.setEnabled(
                 self.cf.reference_layer_complete and
@@ -3925,16 +3894,15 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.rs.tool_mode == 'select_features'
                 )
 
-
     def s_open_data_form(self):
-        """opens data-form for dataLyr from selection-list-cell-widget, edit_pk stored as property"""
+        """opens Data-form for dataLyr from selection-list-cell-widget, edit_pk stored as property"""
         # Rev. 2023-05-03
         edit_pk = self.sender().property('edit_pk')
         data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
         if data_feature and data_feature.isValid():
             self.iface.openFeatureForm(self.ds.dataLyr, data_feature, True)
         else:
-            self.push_messages(warning_msg=self.tr(f"no feature with ID '{edit_pk}' in data-layer {self.ds.dataLyr.name()}"))
+            self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with ID {apos}{0}{apos} in Data-Layer {apos}{1}{apos}"),edit_pk, self.ds.dataLyr.name()))
 
     def s_highlight_edit_pk(self):
         """select for edit and pan to Feature from selection-list-cell-widget, edit_pk stored as property"""
@@ -3955,7 +3923,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             self.rs.edit_pk = None
             self.dlg_refresh_edit_section()
 
-
     def s_pan_edit_pk(self):
         """edit and pan to feature from selction-list"""
         # Rev. 2023-05-03
@@ -3972,7 +3939,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             if show_feature and show_feature.isValid():
                 self.iface.openFeatureForm(self.ds.showLyr, show_feature, True)
             else:
-                self.push_messages(warning_msg=self.tr(f"no feature with value '{edit_pk}' in back-reference-field '{self.ds.showLyrBackReferenceField.name()}' of show-layer '{self.ds.showLyr.name()}'"))
+                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in Back-Reference-field {apos}{1}{apos} of Show-Layer {apos}{2}{apos}"),edit_pk, self.ds.showLyrBackReferenceField.name(), self.ds.showLyr.name()))
 
     def s_open_ref_form_by_edit_pk(self):
         """opens feature-form for refLyr from selection-list, edit_pk stored as property in cell-widget"""
@@ -3984,7 +3951,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             if ref_feature and ref_feature.isValid():
                 self.iface.openFeatureForm(self.ds.refLyr, ref_feature, True)
             else:
-                self.push_messages(warning_msg=self.tr(f"no feature with value '{data_feature[self.ds.dataLyrReferenceField.name()]}' in field '{self.ds.dataLyrReferenceField.name()}' of layer '{self.ds.refLyr.name()}'"))
+                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in field {apos}{1}{apos} of Reference-Layer {apos}{2}{apos}"),data_feature[self.ds.dataLyrReferenceField.name()], self.ds.dataLyrReferenceField.name(), self.ds.refLyr.name()))
 
     def s_highlight_ref_feature_by_edit_pk(self):
         """highlights referenced line-feature from selection-list, edit_pk stored as property in cell-widget"""
@@ -3996,7 +3963,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             if ref_feature and ref_feature.isValid():
                 self.draw_reference_geom(ref_feature.id())
             else:
-                self.push_messages(warning_msg=self.tr(f"no feature with value '{data_feature[self.ds.dataLyrReferenceField.name()]}' in field '{self.ds.dataLyrReferenceField.name()}' of layer '{self.ds.refLyr.name()}'"))
+                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in field {apos}{1}{apos} of Reference-Layer {apos}{2}{apos}"),data_feature[self.ds.dataLyrReferenceField.name()], self.ds.dataLyrReferenceField.name(), self.ds.refLyr.name()))
 
     def s_zoom_ref_feature_by_edit_pk(self):
         """highlight and zoom to referenced line-feature from selection-list, edit_pk stored as property in cell-widget"""
@@ -4006,7 +3973,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         if data_feature and data_feature.isValid():
             ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
             if ref_feature and ref_feature.isValid():
-                if ref_feature.hasGeometry():
+                if ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
                     extent = ref_feature.geometry().boundingBox()
                     source_crs = self.ds.refLyr.crs()
                     target_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
@@ -4016,9 +3983,9 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     self.iface.mapCanvas().zoomByFactor(1.1)
                     self.draw_reference_geom(ref_feature.id())
                 else:
-                    self.push_messages(warning_msg=self.tr(f"Reference-feature without geometry (layer '{self.ds.refLyr.name()}', field '{self.ds.dataLyrReferenceField.name()}', value '{data_feature[self.ds.dataLyrReferenceField.name()]}')"))
+                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature without geometry (Reference-Layer {apos}{0}{apos}, field {apos}{1}{apos}, value {apos}{2}{apos})"),self.ds.refLyr.name(), self.ds.dataLyrReferenceField.name(), data_feature[self.ds.dataLyrReferenceField.name()]))
         else:
-            self.push_messages(warning_msg=self.tr(f"no feature with value '{data_feature[self.ds.dataLyrReferenceField.name()]}' in field '{self.ds.dataLyrReferenceField.name()}' of layer '{self.ds.refLyr.name()}'"))
+            self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in field {apos}{1}{apos} of Reference-Layer {apos}{2}{apos}"),data_feature[self.ds.dataLyrReferenceField.name()], self.ds.dataLyrReferenceField.name(), self.ds.refLyr.name()))
 
     def store_settings(self):
         """store all permanent settings to project
@@ -4039,7 +4006,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             else:
                 qgis.core.QgsProject.instance().removeEntry('LinearReferencing', key)
 
-
     def unload(self):
         """triggered by LinearReference => unload() and project.close()
         for project.close only necessary for the layer-actions, which are stored in project-file
@@ -4052,7 +4018,6 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         self.store_settings()
 
         self.disconnect_all_layers()
-
 
         try:
             # remove canvas-graphics

@@ -28,6 +28,8 @@ the Free Software Foundation; either version 2 of the License, or
 import qgis
 from qgis._core import QgsProject
 
+from PyQt5 import QtCore
+
 from LinearReferencing.tools.MyDebugFunctions import debug_print
 
 from LinearReferencing.tools.MyDebugFunctions import get_debug_pos as gdp
@@ -36,6 +38,8 @@ from LinearReferencing.tools.MyDebugFunctions import get_debug_pos as gdp
 iface = qgis.utils.iface
 
 _plugin_name = 'LinearReferencing'
+
+from LinearReferencing.tools.MyToolFunctions import qt_format
 
 def edit_line_on_line_feature(fid: int, layer_id: str, zoom_to_feature: bool) -> None:
     """
@@ -68,14 +72,19 @@ def edit_line_on_line_feature(fid: int, layer_id: str, zoom_to_feature: bool) ->
 
 
             if data_or_show_lyr == mt.ds.dataLyr:
-                data_feature = data_or_show_lyr.getFeature(fid)
-                if data_feature.isValid():
-                    edit_pk = data_feature[mt.ds.dataLyrIdField.name()]
-                    mt.set_edit_pk(edit_pk, zoom_to_feature)
-                    mt.my_dialogue.edit_grb.setChecked(1)
-                    mt.my_dialogue.selection_grb.setChecked(1)
+                if mt.cf.data_layer_complete:
+                    data_feature = data_or_show_lyr.getFeature(fid)
+                    if data_feature.isValid():
+                        edit_pk = data_feature[mt.ds.dataLyrIdField.name()]
+                        mt.set_edit_pk(edit_pk, zoom_to_feature)
+                        mt.my_dialogue.edit_grb.setChecked(1)
+                        mt.my_dialogue.selection_grb.setChecked(1)
+                    else:
+                        mt.push_messages(critical_msg=qt_format(QtCore.QCoreApplication.translate('FeatureActions',"no valid Feature for FID '{0}' in Layer '{1}'..."),fid,layer_id))
                 else:
-                    mt.push_messages(critical_msg=mt.tr(f"no valid feature for FID {fid} in Layer '{layer_id}'..."))
+                    mt.my_dialogue.tbw_central.setCurrentIndex(1)
+                    mt.push_messages(critical_msg=QtCore.QCoreApplication.translate('FeatureActions',"Data-Layer not fully configured in LinearReferencing Line-on-Line-Settings..."))
+
             elif data_or_show_lyr == mt.ds.showLyr:
                 if mt.cf.show_layer_complete:
                     show_feature = data_or_show_lyr.getFeature(fid)
@@ -85,21 +94,20 @@ def edit_line_on_line_feature(fid: int, layer_id: str, zoom_to_feature: bool) ->
                         mt.my_dialogue.edit_grb.setChecked(1)
                         mt.my_dialogue.selection_grb.setChecked(1)
                     else:
-
-                        mt.push_messages(critical_msg=mt.tr(f"no valid feature for FID {fid} in Layer '{layer_id}'..."))
+                        mt.push_messages(critical_msg=qt_format(QtCore.QCoreApplication.translate('FeatureActions',f"no valid Feature for FID {apos}{0}{apos} in Layer {apos}{1}{apos}..."),fid,layer_id))
                 else:
                     mt.my_dialogue.tbw_central.setCurrentIndex(1)
-                    mt.push_messages(critical_msg=mt.tr("Missing configuration Show-layer->Back-Reference-Field..."))
+                    mt.push_messages(critical_msg=QtCore.QCoreApplication.translate('FeatureActions',"Show-Layer not fully configured in LinearReferencing Line-on-Line-Settings..."))
 
 
             else:
                 # called from a table, which currently not registered in the Plugin-map-tool as data-layer or virtual-layer
                 mt.my_dialogue.tbw_central.setCurrentIndex(1)
-                mt.push_messages(critical_msg=mt.tr(f"layer '{data_or_show_lyr}' not registered as data-layer or show-layer, please redefine layers in plugin-dialogue!"))
+                mt.push_messages(critical_msg=qt_format(QtCore.QCoreApplication.translate('FeatureActions',"Layer {apos}{0}{apos} not registered as Data- or Show-Layer, please configure LinearReferencing Line-on-Line-Settings..."),data_or_show_lyr.name()))
         else:
-            iface.messageBar().pushMessage("Plugin not configured...",level=qgis.core.Qgis.Critical, duration=20)
+            iface.messageBar().pushMessage("Plugin 'LinearReferencing' not configured...",level=qgis.core.Qgis.Critical, duration=20)
     else:
-        iface.messageBar().pushMessage(f"Plugin {_plugin_name} required, please install and enable!",level=qgis.core.Qgis.Critical, duration=20)
+        iface.messageBar().pushMessage("Plugin 'LinearReferencing' required, please install and enable!",level=qgis.core.Qgis.Critical, duration=20)
 
 
 
@@ -135,14 +143,18 @@ def edit_point_on_line_feature(fid: int, layer_id: str, pan_to_feature: bool) ->
             mt.my_dialogue.show()
             data_or_show_lyr = QgsProject.instance().mapLayer(layer_id)
             if data_or_show_lyr == mt.ds.dataLyr:
-                data_feature = data_or_show_lyr.getFeature(fid)
-                if data_feature.isValid():
-                    edit_pk = data_feature[mt.ds.dataLyrIdField.name()]
-                    mt.set_edit_pk(edit_pk, pan_to_feature)
-                    mt.my_dialogue.edit_grb.setChecked(1)
-                    mt.my_dialogue.selection_grb.setChecked(1)
+                if mt.cf.data_layer_complete:
+                    data_feature = data_or_show_lyr.getFeature(fid)
+                    if data_feature.isValid():
+                        edit_pk = data_feature[mt.ds.dataLyrIdField.name()]
+                        mt.set_edit_pk(edit_pk, pan_to_feature)
+                        mt.my_dialogue.edit_grb.setChecked(1)
+                        mt.my_dialogue.selection_grb.setChecked(1)
+                    else:
+                        mt.push_messages(critical_msg=qt_format(QtCore.QCoreApplication.translate('FeatureActions',"no valid Feature for FID {apos}{0}{apos} in Layer {apos}{1}{apos}..."),fid,layer_id))
                 else:
-                    mt.push_messages(critical_msg=mt.tr(f"no valid feature for FID {fid} in Layer '{layer_id}'..."))
+                    mt.push_messages(critical_msg=QtCore.QCoreApplication.translate('FeatureActions',"Data-Layer not fully configured in LinearReferencing Point-on-Line-Settings..."))
+                    mt.my_dialogue.tbw_central.setCurrentIndex(1)
             elif data_or_show_lyr == mt.ds.showLyr:
                 if mt.cf.show_layer_complete:
                     show_feature = data_or_show_lyr.getFeature(fid)
@@ -152,17 +164,17 @@ def edit_point_on_line_feature(fid: int, layer_id: str, pan_to_feature: bool) ->
                         mt.my_dialogue.edit_grb.setChecked(1)
                         mt.my_dialogue.selection_grb.setChecked(1)
                     else:
-                        mt.push_messages(critical_msg=mt.tr(f"no valid feature for FID {fid} in Layer '{layer_id}'..."))
+                        mt.push_messages(critical_msg=qt_format(QtCore.QCoreApplication.translate('FeatureActions',"no valid Feature for FID {apos}{0}{apos} in Layer {apos}{1}{apos}..."),fid,layer_id))
                 else:
-                    mt.push_messages(critical_msg=mt.tr("Missing configuration Show-layer->Back-Reference-Field..."))
+                    mt.push_messages(critical_msg=QtCore.QCoreApplication.translate('FeatureActions',"Show-Layer not fully configured in LinearReferencing Point-on-Line-Settings..."))
                     mt.my_dialogue.tbw_central.setCurrentIndex(1)
             else:
                 # called from a table, which currently not registered in the Plugin-map-tool as data-layer or virtual-layer
-                mt.push_messages(critical_msg=mt.tr(f"layer '{data_or_show_lyr}' not registered as data-layer or show-layer, please redefine layers in plugin-dialogue!"))
+                mt.push_messages(critical_msg=qt_format(QtCore.QCoreApplication.translate('FeatureActions',"Layer {apos}{0}{apos} not registered as Data- or Show-Layer, please configure LinearReferencing Point-on-Line-Settings..."),data_or_show_lyr.name()))
                 mt.my_dialogue.tbw_central.setCurrentIndex(1)
         else:
-            iface.messageBar().pushMessage("Plugin not configured...", level=qgis.core.Qgis.Critical, duration=20)
+            iface.messageBar().pushMessage("Plugin 'LinearReferencing' not configured...", level=qgis.core.Qgis.Critical, duration=20)
     else:
-        iface.messageBar().pushMessage(f"Plugin {_plugin_name} required, please install and enable!",level=qgis.core.Qgis.Critical, duration=20)
+        iface.messageBar().pushMessage("Plugin 'LinearReferencing' required, please install and enable!",level=qgis.core.Qgis.Critical, duration=20)
 
 
