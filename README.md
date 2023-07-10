@@ -82,17 +82,18 @@ which refused to calculate geometries for offset value 0.
 
 ## Addendum ##
 - the Plugin was developed in 2023 with the newest available QGis-version:
-  - 3.30 "s'Hertogenbosch"
+  - 3.32 "Lima"
   - Windows (11)
   - Linux (Mint 21.1 "Vera")
 - not tested with older/LTR-versions
 - not tested on QGis for macOS
 - please report bugs or ideas for missing features 
 - or translation-errors :-)
+- or support the plugin-usability for the community with pylupdate5/lsrelease-translations to other languages then english/german
 
 
 ## More Instructions: ##
-[docs/index.html](./docs/index.html)
+[docs/index.html](https://htmlpreview.github.io/?https://github.com/Ludwig-K/QGisLinearReference/blob/main/docs/index.html)
 
 
 ## Contribute ##
