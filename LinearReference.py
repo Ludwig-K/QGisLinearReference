@@ -40,8 +40,8 @@ class LinearReference(object):
     # Rev. 2023-04-21
 
     # basic settings: which actions and maptools should be available?
-    install_LolEvt = True
     install_PolEvt = True
+    install_LolEvt = True
     install_Help = True
 
     def __init__(self, iface: qgis.gui.QgisInterface):
@@ -66,37 +66,10 @@ class LinearReference(object):
         qgis.core.QgsProject.instance().layersAdded.connect(self.recheck_settings)
         qgis.core.QgsProject.instance().layersRemoved.connect(self.recheck_settings)
 
-        # because __init__ is executed even if no project exists the initialization of mapTools must be delayed to take place as soon as an existing project is loaded
-        qgis.core.QgsProject.instance().readProject.connect(self.read_project)
-
         # triggered *before* the project is saved to file
         qgis.core.QgsProject.instance().writeProject.connect(self.store_settings)
 
         # no further initialization, the mapTools are only created when they are needed
-
-
-    def read_project(self):
-        """delayed initialization of the mapTools as soon as an existing project is opened
-        advantage:
-        settings from the opened project are restored, checked and everything already prepared before the Plugin-Actions are triggered
-        """
-        # Rev. 2023-04-27
-
-        if self.install_LolEvt:
-            if not self.mt_LolEvt:
-                self.mt_LolEvt = map_tools.LolEvt(self.iface)
-
-            self.mt_LolEvt.restore_settings()
-            self.mt_LolEvt.refresh_gui()
-
-
-
-        if self.install_PolEvt:
-            if not self.mt_PolEvt:
-                self.mt_PolEvt = map_tools.PolEvt(self.iface)
-
-            self.mt_PolEvt.restore_settings()
-            self.mt_PolEvt.refresh_gui()
 
 
     def install_translator(self):
@@ -206,6 +179,13 @@ class LinearReference(object):
         if self.mt_LolEvt:
             self.mt_LolEvt.unload()
 
+        # allways remove layer-actions, also if the MapTools was not initialized
+        for cl in qgis.core.QgsProject.instance().mapLayers().values():
+            if cl.type() == qgis.core.QgsMapLayerType.VectorLayer:
+                action_list = [action for action in cl.actions().actions() if action.id() in [map_tools.PolEvt._lyr_act_id_1, map_tools.PolEvt._lyr_act_id_2,map_tools.LolEvt._lyr_act_id_1, map_tools.LolEvt._lyr_act_id_2]]
+                for action in action_list:
+                    cl.actions().removeAction(action.id())
+
         self.iface.removeToolBarIcon(self.qact_PolEvt)
         self.iface.removePluginMenu('LinearReferencing', self.qact_PolEvt)
 
@@ -240,16 +220,11 @@ class LinearReference(object):
         webbrowser.open(url, new=2)
 
     def set_map_tool_PolEvt(self) -> None:
-        """set this MapTool for the canvas"""
+        """set this MapTool for the canvas, triggered by click on Toolbar or Menu"""
         # Rev. 2023-04-21
+        # only create if necessary => first call
         if not self.mt_PolEvt:
             self.mt_PolEvt = map_tools.PolEvt(self.iface)
-            self.iface.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.mt_PolEvt.my_dialogue)
-            self.mt_PolEvt.my_dialogue.setFloating(True)
-            start_pos_x = int(self.iface.mainWindow().x() + 0.15 * self.iface.mainWindow().width())
-            start_pos_y = int(self.iface.mainWindow().y() + 0.15 * self.iface.mainWindow().height())
-            self.mt_PolEvt.my_dialogue.setGeometry(start_pos_x, start_pos_y, 530, 440)
-
 
         # restores a minimized or hidden (==closed) window
         if (QtCore.Qt.WindowMinimized & self.mt_PolEvt.my_dialogue.windowState()) or not self.mt_PolEvt.my_dialogue.isVisible():
@@ -260,19 +235,11 @@ class LinearReference(object):
         self.mt_PolEvt.my_dialogue.show()
 
 
-
-
-
     def set_map_tool_LolEvt(self) -> None:
-        """set this MapTool for the canvas"""
+        """set this MapTool for the canvas, triggered by click on Toolbar or Menu"""
         # Rev. 2023-04-21
         if not self.mt_LolEvt:
             self.mt_LolEvt = map_tools.LolEvt(self.iface)
-            self.iface.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.mt_LolEvt.my_dialogue)
-            self.mt_LolEvt.my_dialogue.setFloating(True)
-            start_pos_x = int(self.iface.mainWindow().x() + 0.2 * self.iface.mainWindow().width())
-            start_pos_y = int(self.iface.mainWindow().y() + 0.2 * self.iface.mainWindow().height())
-            self.mt_LolEvt.my_dialogue.setGeometry(start_pos_x, start_pos_y, 750, 530)
 
         # restores a minimized or hidden (==closed) window
         if (QtCore.Qt.WindowMinimized & self.mt_LolEvt.my_dialogue.windowState())  or not self.mt_LolEvt.my_dialogue.isVisible():
@@ -280,11 +247,3 @@ class LinearReference(object):
         self.iface.mapCanvas().setMapTool(self.mt_LolEvt)
         self.mt_LolEvt.refresh_gui()
         self.mt_LolEvt.my_dialogue.show()
-
-
-
-
-
-
-
-
