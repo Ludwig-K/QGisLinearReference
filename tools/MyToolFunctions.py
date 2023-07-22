@@ -166,10 +166,10 @@ def get_data_layers() -> dict:
     """
     ld = {}
     no_geometry_wkb_types = [
-        qgis.core.Qgis.WkbType.NoGeometry
+        qgis.core.QgsWkbTypes.NoGeometry
     ]
     for cl in qgis.core.QgsProject.instance().mapLayers().values():
-        if cl.type() == qgis.core.Qgis.LayerType.VectorLayer and cl.dataProvider().wkbType() in no_geometry_wkb_types:
+        if cl.type() == qgis.core.QgsMapLayerType.VectorLayer and cl.dataProvider().wkbType() in no_geometry_wkb_types:
             ld[cl.id()] = cl
     return ld
 
@@ -184,23 +184,23 @@ def get_linestring_layers()->dict:
     """
     ld = {}
     linestring_wkb_types = [
-        qgis.core.Qgis.WkbType.LineString25D,
-        qgis.core.Qgis.WkbType.MultiLineString25D,
-        qgis.core.Qgis.WkbType.LineString,
-        qgis.core.Qgis.WkbType.MultiLineString,
-        qgis.core.Qgis.WkbType.LineStringZ,
-        qgis.core.Qgis.WkbType.MultiLineStringZ,
-        qgis.core.Qgis.WkbType.LineStringM,
-        qgis.core.Qgis.WkbType.MultiLineStringM,
-        qgis.core.Qgis.WkbType.LineStringZM,
-        qgis.core.Qgis.WkbType.MultiLineStringZM,
+        qgis.core.QgsWkbTypes.LineString25D,
+        qgis.core.QgsWkbTypes.MultiLineString25D,
+        qgis.core.QgsWkbTypes.LineString,
+        qgis.core.QgsWkbTypes.MultiLineString,
+        qgis.core.QgsWkbTypes.LineStringZ,
+        qgis.core.QgsWkbTypes.MultiLineStringZ,
+        qgis.core.QgsWkbTypes.LineStringM,
+        qgis.core.QgsWkbTypes.MultiLineStringM,
+        qgis.core.QgsWkbTypes.LineStringZM,
+        qgis.core.QgsWkbTypes.MultiLineStringZM,
         # problematic: Shape-Format doesn't distinguish between single- and multi-geometry-types
         # unpredictable though, how measures on multi-linestring will be located
     ]
     for cl in qgis.core.QgsProject.instance().mapLayers().values():
         # ➜ https://api.qgis.org/api/classQgsDataProvider.html ➜ memory/virtual/ogr
         #  Skip Virtual-layers: and cl.dataProvider().name() != 'virtual'
-        if cl.type() == qgis.core.Qgis.LayerType.VectorLayer and cl.dataProvider().wkbType() in linestring_wkb_types:
+        if cl.type() == qgis.core.QgsMapLayerType.VectorLayer and cl.dataProvider().wkbType() in linestring_wkb_types:
             ld[cl.id()] = cl
     return ld
 
@@ -212,15 +212,15 @@ def get_point_show_layers() -> dict:
     # Rev. 2023-05-22
     ld = {}
     single_point_wkb_types = [
-        qgis.core.Qgis.WkbType.Point25D,
-        qgis.core.Qgis.WkbType.Point,
-        qgis.core.Qgis.WkbType.PointZ,
-        qgis.core.Qgis.WkbType.PointM,
-        qgis.core.Qgis.WkbType.PointZM,
+        qgis.core.QgsWkbTypes.Point25D,
+        qgis.core.QgsWkbTypes.Point,
+        qgis.core.QgsWkbTypes.PointZ,
+        qgis.core.QgsWkbTypes.PointM,
+        qgis.core.QgsWkbTypes.PointZM,
     ]
 
     for cl in qgis.core.QgsProject.instance().mapLayers().values():
-        if cl.type() == qgis.core.Qgis.LayerType.VectorLayer and cl.dataProvider().wkbType() in single_point_wkb_types:
+        if cl.type() == qgis.core.QgsMapLayerType.VectorLayer and cl.dataProvider().wkbType() in single_point_wkb_types:
             if cl.dataProvider().name() not in ['ogr']:
                 caps = cl.dataProvider().capabilities()
                 if not (caps & qgis.core.QgsVectorDataProvider.AddFeatures):
@@ -237,15 +237,15 @@ def get_line_show_layers() -> dict:
     # Rev. 2023-05-22
     ld = {}
     single_line_wkb_types = [
-        qgis.core.Qgis.WkbType.LineString25D,
-        qgis.core.Qgis.WkbType.LineString,
-        qgis.core.Qgis.WkbType.LineStringZ,
-        qgis.core.Qgis.WkbType.LineStringM,
-        qgis.core.Qgis.WkbType.LineStringZM,
+        qgis.core.QgsWkbTypes.LineString25D,
+        qgis.core.QgsWkbTypes.LineString,
+        qgis.core.QgsWkbTypes.LineStringZ,
+        qgis.core.QgsWkbTypes.LineStringM,
+        qgis.core.QgsWkbTypes.LineStringZM,
     ]
 
     for cl in qgis.core.QgsProject.instance().mapLayers().values():
-        if cl.type() == qgis.core.Qgis.LayerType.VectorLayer and cl.dataProvider().wkbType() in single_line_wkb_types:
+        if cl.type() == qgis.core.QgsMapLayerType.VectorLayer and cl.dataProvider().wkbType() in single_line_wkb_types:
             if cl.dataProvider().name() not in ['ogr']:
                 caps = cl.dataProvider().capabilities()
                 if not (caps & qgis.core.QgsVectorDataProvider.AddFeatures):
@@ -266,14 +266,14 @@ def get_point_layers() -> dict:
     """
     ld = {}
     single_point_wkb_types = [
-        qgis.core.Qgis.WkbType.Point25D,
-        qgis.core.Qgis.WkbType.Point,
-        qgis.core.Qgis.WkbType.PointZ,
-        qgis.core.Qgis.WkbType.PointM,
-        qgis.core.Qgis.WkbType.PointZM,
+        qgis.core.QgsWkbTypes.Point25D,
+        qgis.core.QgsWkbTypes.Point,
+        qgis.core.QgsWkbTypes.PointZ,
+        qgis.core.QgsWkbTypes.PointM,
+        qgis.core.QgsWkbTypes.PointZM,
     ]
     for cl in qgis.core.QgsProject.instance().mapLayers().values():
-        if cl.type() == qgis.core.Qgis.LayerType.VectorLayer and cl.dataProvider().wkbType() in single_point_wkb_types:
+        if cl.type() == qgis.core.QgsMapLayerType.VectorLayer and cl.dataProvider().wkbType() in single_point_wkb_types:
             ld[cl.id()] = cl
     return ld
 
