@@ -77,6 +77,7 @@
                     <li><a class="jump" data-jump_elm_id="note_snapping">Snapping</a></li>
                     <li><a class="jump" data-jump_elm_id="note_multi_linestring">Multi-Linestring-Support</a></li>
                     <li><a class="jump" data-jump_elm_id="note_linestring_m">LinestringM-Support</a></li>
+                    <li><a class="jump" data-jump_elm_id="note_development">Development and support</a></li>
                 </ul>
             </li>
         </ul>
@@ -682,7 +683,7 @@
                         <pre class="code">Return a Linestring being a substring of the input one starting and ending at the given fractions of total 2d length.
 Second and third arguments are expected to be in the range between 0.0 and 1.0.
 NULL is returned for invalid arguments</pre>
-                        The above function requires "Start_fraction" less than "end_fraction", else <i>NULL is returned for invalid arguments</i>. Nevertheless the plugin allows the storage of "reverse"-stationed measurments, because of a complex expression in the virtual-Show-Layer-query. But this can lead to problems, if these values are used in less complex virtual-layer-query or externally, f.e. inside a PostGIS-View.
+                        The above function requires "Start_fraction" less than "end_fraction", else <i>NULL is returned for invalid arguments</i>. Nevertheless, the plugin allows the storage of "reverse"-stationed measurements, because of a complex expression in the virtual-Show-Layer-query. But this can lead to problems, if these values are used in less complex virtual-layer-query or externally, f.e. inside a PostGIS-View.
                     </li>
                 </ol>
             </div>
@@ -730,6 +731,15 @@ NULL is returned for invalid arguments</pre>
                 <div class="notes">
                     Note:<br/> <b>PostGis</b> offers possibilities to calculate points/segments on linestring-m-geometries with calibrated m-values (compressed/stretched/not starting at 0)<br/> See <a href="https://postgis.net/docs/manual-3.3/reference.html#Linear_Referencing" target="_blank">PostGis Linear_Referencing</a>.
                 </div>
+            </div>
+            <div id="note_development">
+                <h3>Development and support</h3>
+                <ul>
+                    <li>The Plugin was developed on QGis Versions 3.32 'Lima' and 3.28 'Firence' (LTR), perhaps runnable on older versions, but not tested so far.</li>
+                    <li>Source-Code and issue-tracker can be found under <a href="https://github.com/Ludwig-K/QGisLinearReference/" target="_blank">https://github.com/Ludwig-K/QGisLinearReference/</a>, please file any found bugs or suggestions for improvement there.</li>
+                    <li>Translation support (Qt-Linguist) would be nice, the source language is English, a full translation into German is implemented, a translation attempt into French was aborted (pardon...).</li>
+                    <li>You can contact me by mail at: <a href="mailto:ludwig@kni-online.de?subject=QGis-Plugin LinearReferencing">ludwig@kni-online.de</a></li>
+                </ul>
             </div>
         </div>
     </div>
