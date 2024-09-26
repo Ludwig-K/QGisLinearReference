@@ -1,0 +1,1506 @@
+<!doctype html>
+<html lang="de">
+
+<head>
+	<meta content="text/html;charset=utf-8" http-equiv="content-type">
+	<link href='./index.css' rel='stylesheet' type='text/css' />
+	<script src='./index.js' type='text/javascript'></script>
+	<title>QGis-Erweiterung Lineare Referenzierung</title>
+	<link rel="icon" href="./images/linear_referencing.svg" />
+</head>
+
+<body onload='init();'>
+	<div id="language_select">
+		<a href="index.de.html" title="language DE"><img style="width: 30px; height: 20px; border: 2px solid silver;"
+				src="images/Flag_of_Germany.svg" /></a>
+		<a href="index.en.html" title="language UK"><img
+				style="width: 30px; height: 20px; border: 2px solid transparent;" src="images/Flag_of_UK.svg" /></a>
+	</div>
+
+	<div class="p_1" id="top">
+		<h1>Lineare Referenzierung</h1>
+		Diese QGis-Erweiterung unterstützt bei der Messung von Punkten/Abschnitten auf Referenz-Linien
+		und der Erfassung linear referenzierter Datensätze.
+		<div class="p_2" data-initially_open="1" data-toggle_elm_id="toc_content" data-toggle_icon_id="toc_icon"
+			id="toc">
+			<h2>
+				<span id="toc_icon"></span>Inhalt
+			</h2>
+			<div class="p_0"></div>
+			<ul id="toc_content">
+				<li><a class="jump_forward" data-jump_elm_id="basics">Prinzip der linearen Referenzierung</a>
+					<ul>
+						<li><a class="jump_forward" data-jump_elm_id="necessary_layers">erforderliche Layer</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="lr_modes">LR-Modus</a>
+							<ul>
+								<li><a class="jump_forward" data-jump_elm_id="lr_mode_compare">Auswirkung von Änderungen
+										der Referenzgeometrie</a>
+								</li>
+								<li><a class="jump_forward" data-jump_elm_id="lr_conversion">Umrechnung</a></li>
+							</ul>
+						</li>
+					</ul>
+				</li>
+				<li><a class="jump_forward" data-jump_elm_id="usage">Anwendung</a>
+					<ul>
+						<li><a class="jump_forward" data-jump_elm_id="settings">Einstellungen</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="measurement">Messung</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="feature_selection">Feature-Auswahl</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="post_processing">Post-Processing</a></li>
+					</ul>
+				</li>
+				<li><a class="jump_forward" data-jump_elm_id="note_development">Entwicklung und Unterstützung</a></li>
+			</ul>
+		</div>
+		<div class="p_2" data-toggle_elm_id="basics_content" data-toggle_icon_id="basics_icon" id="basics">
+			<h2>
+				<span id="basics_icon"></span>Prinzip der Linearen Referenzierung
+			</h2>
+			<div class="p_3" id="basics_content">
+				<b>"Normale"</b> Vektorlayer speichern Geometrien mittels numerischer Koordinaten.<br />
+				<b>"Linear referenzierte"</b> Layer verwenden numerische Stationierungen auf zugeordneten
+				Referenz-Linien:
+
+
+
+				<table class="compare">
+					<tr>
+						<td>Linear referenzierte <b>Punkt</b>-Layer<br />
+							(<i>"PoL"</i>, Point-on-Line)</td>
+						<td>Linear referenzierte <b>Linien</b>-Layer<br />
+							(<i>"LoL"</i>, Line-on-Line)</td>
+					</tr>
+					<tr>
+						<td>je Datensatz ein Punkt mittels Linienzuordnung und Stationierung</td>
+						<td>
+							je Datensatz ein Linienabschnitt mittels Linienzuordnung und zwei Stationierungen
+							(Von...Bis)<br />
+							und einem Abstand zur Linie <sup class="sup_flyout" data-flyout_id="sup_offset"></sup>
+						</td>
+					</tr>
+					<tr>
+						<td>z. B. Bauwerke an einem Gewässer:<br /><img src="images/2024-09-02 PoL Sample de.png"
+								style="width:700px;" /></td>
+						<td>z. B. Abschnitte an einem Gewässer:<br /><img src="images/2024-09-02 LoL Sample de.png"
+								style="width:800px;" /></td>
+					</tr>
+				</table>
+
+				<div id="necessary_layers" class="p_4">
+					<h4>Erforderliche Layer</h4>
+					Für Erfassung und Darstellung eines linear referenzierten Datenbestandes verwendet das Plugin drei
+					Layer:
+					<div id="reference_layer" class="p_5">
+						<h5>Referenz-Layer</h5>
+						Auf den Linestring-Geometrien dieses Layers werden die zugeordneten linear referenzierten
+						Datensätze numerisch
+						positioniert.
+						<ul>
+							<li>Vektorlayer</li>
+							<li>QGis unterstütze Datenformate (GeoPackage, SQLite, SpatiaLite, Shape,
+								Geo-Datenbank...)
+							</li>
+							<li>Typ LineString (LineString, LineStringM, LineStringZ, LineStringZM, MultiLineString,
+								MultiLineStringM, MultiLineStringZ, MultiLineStringZM)</li>
+							<li>Projektion beliebig</li>
+							<li>eindeutiges ID-Feld erforderlich</li>
+							<li>einheitliche Digitalisier-Richtung
+								<div class="notes">
+									Bei den hier gezeigten Gewässer-Beispielen erfolgt die Digitialisierung in der Regel
+									<b>entgegen</b> der
+									Fließrichtung.
+								</div>
+							</li>
+							<li><a class="jump_forward" data-jump_elm_id="lr_modes">LR-Modus</a> "Nabs" und
+								"Nfract":
+								<ul>
+									<li>Multi-Layer möglich, aber Geometrien einteilig oder mehrteilig und lückenlos
+										aufeinanderfolgend</li>
+								</ul>
+							</li>
+
+							<li><a class="jump_forward" data-jump_elm_id="lr_modes">LR-Modus</a> "Mabs":
+								<ul>
+									<li>Referenz-Layer-Typ mit M-Werten</li>
+									<li>M-Werte stetig ansteigend (siehe <a
+											href="https://www.gaia-gis.it/gaia-sins/spatialite-sql-latest.html"
+											target="_blank" target="_blank">SpatiaLite</a>, Funktionen
+										ST_IsValidTrajectory und ST_TrajectoryInterpolatePoint)
+									</li>
+									<li>Multi-Layer möglich, aber nur einteilige Geometrien</li>
+								</ul>
+							</li>
+						</ul>
+
+						<div class="notes">
+							<b>Hinweis zum Snapping:</b><br />
+							Das Plugin verwendet für den registrierten Referenz-Layer eine "Erweiterte Konfiguration"
+							mit Snap auf "Segment, Linienendpunkte" und einer Toleranz von 10px
+						</div>
+
+					</div>
+
+					<div id="data_layer" class="p_5">
+						<h5>Daten-Layer</h5>
+						Speichert die linear referenzierten Datensätze mittels Zuordnung zum Referenzlayer,
+						Stationierung(en) und beliebige weitere Daten.
+						<ul>
+							<li>Geometrieloser Vektor-Layer</li>
+							<li>QGis unterstütze Datenformate (dBase, GeoPackage, SQLite, SpatiaLite, Datenbank,
+								Office-Tabelle)</li>
+						</ul>
+					</div>
+
+					<div id="show_layer" class="p_5">
+						<h5>Show-Layer</h5>
+						Kartografische Darstellung der linear referenzierten Datensätze.
+						<ul>
+							<li>virtueller Layer</li>
+							<li>SQL-Abfrage auf Referenz- und Datenlayer</li>
+							<li>SpatiaLite-Ausdruck in SQL-Abfrage berechnet Geometrien (evtl. weniger performant)</li>
+							<li>Projektion ergibt sich aus Referenz-Layer</li>
+							<li>funktioniert unabhängig vom Plugin</li>
+						</ul>
+					</div>
+
+					<div class="notes">
+						Hinweise:
+						<ul>
+							<li>Das Plugin kann ohne Daten- und Show-Layer für einfache Messungen ohne
+								Datenspeicherung verwendet werden.</li>
+							<li>Änderungen an Daten- oder Referenzlayer (Spalten umbenennen/löschen/hinzufügen) oder an
+								den Plugin-Einstellungen (registrierte Layer/Felder, LR-Modus...) können die SQL-Abfrage
+								des
+								virtuellen Layers ungültig machen, erforderlichenfalls die SQL-Abfrage des Show-Layers
+								überarbeiten oder den Show-Layer neu anlegen</li>
+						</ul>
+
+					</div>
+
+				</div>
+
+
+				<div id="lr_modes" class="p_4">
+					<h4>"LR-Modus"</h4>
+					Ein Punkt auf einer Linie kann auf mehrere Arten definiert werden:
+					<ul>
+						<li>Lauflänge absolut</li>
+						<li>Lauflänge relativ zur Gesamtlänge</li>
+						<li>Lauflänge prozentual zur Gesamtlänge</li>
+						<li>Bezugspunkt Startpunkt der Referenzlinie</li>
+						<li>Bezugspunkt Endpunkt der Referenzlinie</li>
+						<li>unter Verwendung von Vertex-M-Werten</li>
+						<li>einfacher Punktlayer (ohne lineare Referenzierung)</li>
+						<li>gemischt, z. B. berechnete Stationierung aus Punkt-Layer gesnappt auf Referenz-Layer</li>
+						<li>...</li>
+					</ul>
+
+					Das Plugin implementiert die Varianten
+					<ul>
+						<li><i>"Nabs"</i><br />
+							absolute natürliche Stationierung (Lauflänge zum Startpunkt)<br />
+							Wertebereich: 0 ... Länge der jeweils zugeordneten Referenzlinie
+						</li>
+						<li><i>"Nfract"</i><br />
+							relative natürliche Stationierung (Lauflänge/Gesamtlänge)<br />
+							Wertebereich: 0 ... 1
+						</li>
+						<li><i>"Mabs"</i><sup class="sup_flyout" data-flyout_id="sup_requires_linestring_m"></sup><br />
+							M-Stationierung (Positionierung unter Verwendung der Vertex-M-Werte)<br />
+							Wertebereich: M-Werte erster ... letzter Vertex der zugeordneten
+							Referenzlinie
+						</li>
+					</ul>
+
+
+					<div class="p_4" data-toggle_elm_id="compare_content" data-toggle_icon_id="compare_icon"
+						id="lr_mode_compare">
+						<h4>
+							<span id="compare_icon"></span>Auswirkung von Änderungen der Referenzgeometrie auf linear
+							referenzierte Geometrien in
+							Abhängigkeit vom LR-Modus
+						</h4>
+
+						<div class="p_5" id="compare_content">
+							(siehe auch <a class="jump_forward" data-jump_elm_id="post_processing">Post-Processing</a>)
+							<table class="compare">
+								<tr>
+									<th colspan="4" style="border-style: none;">Demo-Beispiel Referenz-Geometrie:</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="3">
+
+										<img src="images/2024-09-21 sample_line_1.png" style="width:1000px;" />
+										<ul>
+											<li>LinestringM</li>
+											<li>Vertices vertikal auf einer Höhe, horizontaler Abstand 10m</li>
+											<li>M-Wert == Vertex-Index</li>
+											<li>WKT
+												<pre
+													class="code">LineStringM (310900 5650000 0, 310910 5650000 1, 310920 5650000 2, 310930 5650000 3, 310940 5650000 4, 310950 5650000 5, 310960 5650000 6, 310970 5650000 7, 310980 5650000 8, 310990 5650000 9, 311000 5650000 10)</pre>
+											</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Demo-Beispiel LoL:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<td colspan="3">
+										<ul>
+											<li><b>ein</b> Daten-Layer für <b>drei</b> LR-Modi</li>
+											<li>Abschnitt 1 bis 10 starten/enden auf den Vertices</li>
+											<li>Abschnitt 11 bis 15 unterteilen Abschnitt 7</li>
+										</ul>
+
+										<img src="images/2024-09-21 sample_lol_data.png" style="width:1000px;" /><br />
+										(identische Kartendarstellung der drei Show-Layer unabhängig vom LR-Modus)<br />
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Demo-Bearbeitung der Referenzgeometrie:
+									</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<td colspan="3">
+										Vertex 6 um 25 Meter Richtung Norden verschoben:<br />
+										<img src="images/2024-09-21 sample_line_2.png" style="width:1000px;" />
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Auswirkung auf die linear referenzierten
+										Geometrien:</th>
+								</tr>
+								<tr></tr>
+								<th class="blank"></th>
+								<th class="nabs">Nabs</th>
+								<th class="nfract">Nfract</th>
+								<th class="mabs">Mabs</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs"><img src="images/2024-09-21 sample_nabs_2.png"
+											style="width:700px;" />
+									</td>
+									<td class="nfract"><img src="images/2024-09-21 sample_nfract_2.png"
+											style="width:700px;" /></td>
+									<td class="mabs"><img src="images/2024-09-21 sample_mabs_2.png"
+											style="width:700px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs">
+										<b>Hilfsvorstellung:</b><br />
+										<ul>
+											<li>Die Referenzlinien-Vertices sind eine Reihe von Pfosten.</li>
+											<li>Die referenzierten Abschnitte bilden ein <b>starres</b> Seil und sind
+												darauf farblich markiert</li>
+											<li>Das Seil wird am <b>ersten</b> Pfosten verknotet und <b>gleitend</b>
+												über die anderen Pfosten geführt</li>
+											<li>Pfosten 6 wird versetzt, das Seil ist zu kurz, gleitet, im hinteren
+												Bereich verschieben sich alle Markierungen, die letzten
+												Pfosten sind nicht mehr angebunden</li>
+											<li>im vorderen Bereich keine Veränderung</li>
+											<li>die Gesamtlänge des Seiles und die Abstände der Markierungen bleiben
+												unverändert</li>
+										</ul>
+									</td>
+									<td class="nfract">
+										<b>Hilfsvorstellung:</b><br />
+										<ul>
+											<li>Die Referenzlinien-Vertices sind eine Reihe von Pfosten.</li>
+											<li>Die referenzierten Abschnitte bilden ein <b>elastisches</b> Seil und
+												sind darauf farblich markiert</li>
+											<li>Das Seil wird am <b>ersten und letzten</b> Pfosten angeknotet und locker
+												über
+												die Zwischenpfosten geführt</li>
+											<li>Pfosten 6 wird versetzt, das elastische Seil verlängert sich gleichmäßig
+												und gleitet dabei über alle Zwischenpfosten</li>
+											<li>alle Markierungen ändern ihre Länge und Lage</li>
+											<li>die Gesamtlänge des Seiles ändert sich</li>
+											<li>die Längenverhältnisse relativ zur Gesamtlänge bleiben erhalten</li>
+										</ul>
+									</td>
+									<td class="mabs">
+										<b>Hilfsvorstellung:</b>
+										<ul>
+											<li>Die Referenzlinien-Vertices sind eine Reihe von Pfosten.</li>
+											<li>Die referenzierten Abschnitte bilden ein <b>elastisches</b> Seil und
+												sind darauf farblich markiert</li>
+											<li>Das Seil wird an <b>allen</b> Pfosten angeknotet</li>
+											<li>Pfosten 6 wird versetzt, das Seil wird im Bereich Pfosten 5, 6 und 7 in
+												die Länge gezogen</li>
+											<li>die Bereiche außerhalb der Pfosten 5, 6 und 7 bleiben unverändert</li>
+											<li>die Gesamtlänge des Seiles ändert sich</li>
+											<li>alle Markierungen befinden sich noch auf den Pfosten</li>
+											<li>die Längenverhältnisse relativ zur Gesamtlänge ändern sich</li>
+											<li>die Längenverhältnisse zwischen den Pfosten bleiben erhalten</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Vorteile/Nachteile (subjektiv, abhängig
+										vom
+										Anwendungsfall, ohne Anspruch auf Vollständigkeit):</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs">
+										<b>Vorteile:</b>
+										<ul>
+											<li>klassische Form für Stationierungsangaben</li>
+											<li>in GIS/Natur leicht zu verifizieren (einfaches Nachmessen)</li>
+											<li>einfaches numerisches Editieren (z. B. alle Abschnitte um ein konstantes
+												Maß
+												verschieben)</li>
+											<li>Einfache Berechnungen wie z. B. Abschnittslänge = Differenz
+												Von...Bis-Stationierung</li>
+											<li>Änderungen im hinteren Bereich der Referenzlinie haben keinen Einfluss
+												auf
+												vordere
+												Stationierungen</li>
+
+										</ul>
+									</td>
+									<td class="nfract">
+										<b>Vorteile:</b>
+										<ul>
+											<li>bei relativen Anwendungsfällen der Modus der Wahl</li>
+											<li>einfaches relatives Positionieren (0&nbsp;➞&nbsp;Anfang ...
+												1&nbsp;➞&nbsp;Ende der Referenzlinie)</li>
+											<li>weniger projektionsabhängig</li>
+										</ul>
+
+									</td>
+									<td class="mabs">
+										<b>Vorteile:</b>
+										<ul>
+											<li>Referenz-Geometrie-Änderungen betreffen nur linear referenzierte
+												Geometrien
+												in den
+												angrenzenden Bereichen</li>
+											<li>Vertex-M-Werte losgelöst von "natürlicher" Stationierung (z. B.
+												Zeitangaben
+												aus GPS-Aufzeichnungen)</li>
+											<li>Vertex-M-Werte unabhängig von Projektion (z. B. metrischen Stationierung
+												als
+												Vertex-M-Wert in einem WGS-84-Referenzlayer)</li>
+											<li>weniger projektionsabhängig</li>
+											<li>Stationierungen mit Offsets möglich:
+												<ul>
+													<li>Offset &gt; 0: Fortsetzung der Stationierung in einem anderen
+														Referenz-Shape
+														<img src="images/2024-09-22 linestring_m_sample 2.png"
+															style="width:500px;" />
+														<div class="notes">
+															hier:<br />
+															Grenzübertritt der Rur (Deutschland) in die Niederlande
+															(Roer)
+															(die Teil-Geometrien DE/NL liegen als separate Datensätze
+															vor.)<br />
+															DE-Bezugspunkt ist nicht der Grenzübertritt, sondern ein
+															Punkt
+															mit
+															Vertex-M == 0 in den Niederlanden (s.u.).</div>
+													</li>
+													<li>Offset &lt; 0: Stationierung nicht beim ersten Vertex anfangen
+														lassen
+														<img src="images/2024-09-22 linestring_m_sample.png"
+															style="width:500px;" />
+														<div class="notes">
+															hier:<br />
+															Mündung der Rur/Roer in das Folgegewässer Maas/Meuse in den
+															Niederlanden<br />
+															Bezugspunkt ist nicht der Schnittpunkt der (fiktiven)
+															Gewässerachsen, sondern ein (vereinbarter) Punkt mit
+															Vertex-M ==
+															0 an der Uferlinie.</div>
+													</li>
+												</ul>
+												<div class="notes">
+													<ul>
+														<li>Die M-Werte der weiteren Vertices entsprechen der
+															natürlichen
+															Stationierung + Offset</li>
+														<li>Beispiele aus <a
+																href="https://www.lanuv.nrw.de/umwelt/wasser/oberflaechengewaesserfluesse-und-seen/fliessgewaesser/gewaesser-stationierungskarte"
+																target="_blank">Gewässerstationierungskarte NRW</a></li>
+													</ul>
+												</div>
+											</li>
+											<li>Bereiche mit gestauchter/gestreckter Positionierung möglich</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs">
+										<b>Nachteile:</b>
+										<ul>
+											<li>projektionsabhängig: die Berechnung der Positionen erfolgt unter
+												Verwendung
+												der projektionsabhängigen Vertex-X/Y-Werte</li>
+											<li>Maximale Stationierung = Gesamtlänge des Referenz-Shapes<br />➞&nbsp;das
+												Einkürzen der Referenzlinie kann linear referenzierte Geometrien am Ende
+												"abschneiden"</li>
+											<li>Änderungen im vorderen Bereich der Referenzlinie beeinflussen alle
+												folgenden
+												Stationierungen, die umgerechnet (bisherige Stationierung
+												+-Längenänderung)
+												werden müssen</li>
+										</ul>
+
+									</td>
+									<td class="nfract"><b>Nachteile:</b>
+										<ul>
+											<li>In GIS/Natur nicht durch einfaches Nachmessen zu verifizieren</li>
+											<li>Änderungen der Referenzgeometrie verschieben alle linear referenzierten
+												Geometrien</li>
+										</ul>
+									</td>
+									<td class="mabs"><b>Nachteile:</b>
+										<ul>
+											<li>In GIS/Natur nicht durch einfaches Nachmessen zu verifizieren</li>
+											<li>Nach Digitalisierung oder Geometrie-Änderung (z. B. Vertex hinzufügen)
+												müssen die zugehörigen M-Werte nacherfasst (Vertex-Editor) oder
+												berechnet
+												werden.</li>
+											<li>komplexere Positionierung der referenzierten Geometrien, da deren
+												berechnete
+												Lage sowohl von kartografisch <b>sichtbar</b> veränderten Referenzlinien
+												(Vertex-X/Y-Koordinaten) als auch von kartografisch <b>nicht</b>
+												sichtbaren Vertex-M-Werten beeinflusst werden.
+											</li>
+										</ul>
+									</td>
+								</tr>
+							</table>
+						</div>
+					</div>
+
+
+					<div class="p_4" data-toggle_elm_id="lr_conversion_content" data-toggle_icon_id="lr_conversion_icon"
+						id="lr_conversion">
+						<h4>
+							<span id="lr_conversion_icon"></span>Umrechung
+						</h4>
+						<div class="p_5" id="lr_conversion_content">
+							Der nachträgliche Wechsel des LR-Modus erfordert die Umrechnung bereits erfasster
+							Stationierungen.
+							<h6>Empfohlenes Vorgehen:</h6>
+							<ol>
+								<li>(ggf. Sicherheitskopie des Daten-Layers anlegen)</li>
+								<li>Editiermodus Daten-Layer starten</li>
+								<li>zusätzliche numerische Stationierungsfelder anlegen</li>
+								<li>Feldrechner für Daten-Layer aufrufen</li>
+								<li>Umrechnung durchführen (Ausdruck s. u., bei LoL auf beide Stationierungsfelder
+									anzuwenden)</li>
+								<li>in den Plugin-Einstellungen neuen LR-Modus einstellen</li>
+								<li>Show-Layer für den neuen Modus anlegen</li>
+								<li>visueller Vergleich der beiden Show-Layer</li>
+								<li>Editiermodus Daten-Layer beenden</li>
+							</ol>
+
+							<h6>Ausdrücke für Feldrechner</h6>
+							(Bezeichnungen für Layer und Felder anpassen!)
+							<h6>"Nabs"&nbsp;➞&nbsp;"Nfract":</h6>
+							<pre
+								class="code">"_data_layer_stationing_field_n_abs_" / length(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+
+							<h6>"Nabs"&nbsp;➞&nbsp;"Mabs":</h6>
+							<pre
+								class="code">m(&#10;&#09;line_interpolate_point(&#10;&#09;&#09;geometry(&#10;&#09;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;&#09;)&#10;&#09;&#09;),&#10;&#09;&#09;"_data_layer_stationing_field_n_abs_"&#10;&#09;)&#10;)</pre>
+
+
+							<h6>"Nfract"&nbsp;➞&nbsp;"Nabs":</h6>
+							<pre
+								class="code">"_data_layer_stationing_field_n_fract_" * length(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+							<h6>"Nfract"&nbsp;➞&nbsp;"Mabs":</h6>
+							<pre
+								class="code">m(&#10;&#09;line_interpolate_point(&#10;&#09;&#09;geometry(&#10;&#09;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;&#09;)&#10;&#09;&#09;),&#10;&#09;&#09;"_data_layer_stationing_field_n_fract_" * length(&#10;&#09;&#09;&#09;geometry(&#10;&#09;&#09;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;&#09;&#09;)&#10;&#09;&#09;&#09;)&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+							<h6>"Mabs"&nbsp;➞&nbsp;"Nabs" bzw. "Mabs"&nbsp;➞&nbsp;"Nfract"</h6>
+							In QGis wird derzeit keine Funktion zur einfachen Umrechnung von M- nach N-Stationierung
+							angeboten (siehe <a
+								href="https://docs.qgis.org/3.34/en/docs/user_manual/expressions/functions_list.html"
+								target="_blank">docs.qgis.org/.../expressions/functions_list.html</a>), als Workaround
+							kann
+							eine benutzerdefinierte Funktion wie <a href="./scripts/get_point_m_2.py" target="_blank"
+								title="Download Python-Code">get_point_m_2.py</a> im Feldrechner/Funktionseditor
+							angelegt
+							(copy&paste)...
+							<img class="sized_block_image" src="images/2024-09-17 FieldCalculator 1 de.png"
+								style="width: 900px;" />
+							und anschließend im Ausdruck verwendet werden:
+
+							<h6>"Mabs"&nbsp;➞&nbsp;"Nabs"</h6>
+							<pre
+								class="code">get_point_m_2(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09)&#10;&#09;),&#10;&#09;"_data_layer_stationing_field_m_abs_"&#10;)</pre>
+
+							<h6>"Mabs"&nbsp;➞&nbsp;"Nfract"</h6>
+							<pre
+								class="code">get_point_m_2(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09)&#10;&#09;),&#10;&#09;"_data_layer_stationing_field_m_abs_"&#10;) / length(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="p_2" data-initially_open="0" data-toggle_elm_id="usage_content" data-toggle_icon_id="usage_icon"
+			id="usage">
+			<h2><span id="usage_icon"></span>Anwendung</h2>
+
+
+			<div id="usage_content">
+				<div class="p_3" data-toggle_elm_id="settings_content" data-toggle_icon_id="settings_icon"
+					id="settings">
+					<h3><span id="settings_icon"></span>Einstellungen</h3>
+					<div id="settings_content">
+						<div class="p_4">
+							<table class="compare">
+								<tr>
+									<th class="blank"></th>
+									<th>PoL</th>
+									<th>LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>Point-on-Line</td>
+									<td>Line-on-Line</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>Punkt auf Referenz-Linie</td>
+									<td>Liniensegment auf Referenz-Linie</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td><img src="./images/2024-09-03 PoL Toolbar.png" /></td>
+									<td><img src="./images/2024-09-03 LoL Toolbar.png" /></td>
+								</tr>
+								<tr>
+									<td colspan="3" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="necessary_layers">Layer</a> und Felder:</b></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="reference_layer">Referenz-Layer</a></b></td>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="center">
+										<img src="./images/2024-08-14 PoL Settings 1 de.png" style="width: 600px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<ul>
+											<li>Bei Erstaufruf wird ein zu diesem Zeitpunkt geladener Linien-Layer
+												automatisch registriert.</li>
+											<li>Nach der Auswahl des Referenzlayers kann das Plugin für Messungen
+												verwendet werden.</li>
+											<li>Für die Referenz zum Daten-Layer ist ein eindeutiges
+												ID-Feld (integer/string) erforderlich</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="data_layer">Daten-Layer</a></b></td>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th>PoL</th>
+									<th>LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td><img src="./images/2024-08-31 PoL Settings Data Layer de.png"
+											style="width: 600px;" /></td>
+									<td><img src="./images/2024-09-03 LoL Settings Data Layer de.png"
+											style="width: 600px;" /></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ul>
+											<li>ID-Feld&nbsp;➞&nbsp;eindeutiges Feld des Datenlayers, 1:1-Verknüpfung
+												zum Rück-Referenz-Feld des Show-Layer</li>
+											<li>Referenz-Feld&nbsp;➞&nbsp;Verknüpfungsfeld zum Referenz-Layer
+												(Referenz-Layer-ID-Feld)</li>
+											<li>Stationierungs-Feld&nbsp;➞&nbsp;numerisches Feld für die Stationierung
+											</li>
+											<li>LR-Modus&nbsp;➞&nbsp;Art der numerischen Stationierung, siehe <a
+													class="jump_forward" data-jump_elm_id="lr_modes">LR-Modus</a></li>
+											<li id="precision">Genauigkeit&nbsp;➞&nbsp;Anzahl der Nachkommastellen bei
+												der Speicherung der Stationierung<br />
+												(unabhängig von Feld-Definition, "-1"&nbsp;➞&nbsp;maximale Genauigkeit,
+												auch für die Anzeigegenauigkeit in der Feature-Auswahl und das
+												PostProcessing verwendet)</li>
+										</ul>
+									</td>
+									<td>
+										<ul>
+											<li>ID-Feld&nbsp;➞&nbsp;eindeutiges Feld des Datenlayers, 1:1-Verknüpfung
+												zum Rück-Referenz-Feld des Show-Layers</li>
+											<li>Referenz-Feld&nbsp;➞&nbsp;Verknüpfungsfeld zum Referenz-Layer
+												(Referenz-Layer-ID-Feld)</li>
+											<li>Offset-Feld&nbsp;➞&nbsp;Abstand des Segments zur Referenz-Linie <sup
+													class="sup_flyout" data-flyout_id="sup_offset"></sup></li>
+											<li>Von-Feld&nbsp;➞&nbsp;numerisches Feld für die Von-Stationierung</li>
+											<li>Bis-Feld&nbsp;➞&nbsp;numerisches Feld für die Bis-Stationierung</li>
+											<li>LR-Modus&nbsp;➞&nbsp;Art der numerischen Stationierung, siehe <a
+													class="jump_forward" data-jump_elm_id="lr_modes">LR-Modus</a></li>
+											<li>Genauigkeit&nbsp;➞&nbsp;Anzahl der Nachkommastellen (unabhängig von
+												(unabhängig von Feld-Definition, "-1"&nbsp;➞&nbsp;maximale Genauigkeit,
+												auch für die Anzeigegenauigkeit in der Feature-Auswahl und das
+												PostProcessing verwendet)</li>
+										</ul>
+									</td>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="show_layer">Show-layer</a></b></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" style="text-align: center;"><img
+											src="./images/2024-09-03 LoL Settings Show Layer de.png"
+											style="width: 700px;" />
+									</td>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<b>Rück-Referenz-Feld</b>&nbsp;➞&nbsp;1:1-Verknüpfung zum ID-Feld des
+										Daten-layers
+									</td>
+								</tr>
+								<tr>
+									<td colspan="3" class="blank"><b>Darstellung:</b> Stil der temporären Hilfs-Grafiken
+										anpassen
+									</td>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th>PoL</th>
+									<th>LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td><img src="./images/2024-09-02 PoL Settings Style de.png"
+											style="width: 600px;" />
+									</td>
+									<td><img src="./images/2024-09-03 LoL Settings Style de.png"
+											style="width: 600px;" />
+									</td>
+								</tr>
+
+								<tr>
+									<td colspan="3" class="blank"><b>Konfiguration
+											speichern/wiederherstellen:</b>
+
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" style="text-align: center;">
+										<img src="./images/2024-09-03 PoL Settings Store de.png"
+											style="width: 600px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<ul>
+											<li>Speichert die aktuellen Einstellungen (Layer, Felder, Darstellung)</li>
+											<li>Die Anzahl der Konfigurationen im aktuellen QGis-Projekt ist auf 100
+												begrenzt.</li>
+											<li>Hilfreich bei der Verwendung mehrerer linear referenzierter Layer in
+												einem
+												Projekt.</li>
+										</ul>
+									</td>
+								</tr>
+							</table>
+
+						</div>
+						<div class="p_5">
+							<h5>Sonstiges:</h5>
+							<ul>
+								<li><img class="svg_icon" src="images/mActionOpenTable.svg" />Attribut-Tabelle
+									des Referenz-, Daten oder Show-Layers öffnen</li>
+								<li><img class="svg_icon" src="images/mIconExpression.svg" />QGis-Dialog
+									"Anzeignamen" öffnen, Verwendung in QGis für Objekt-Abfrage und
+									Tabellenansicht sowie der Plugin <a class="jump_forward"
+										data-jump_elm_id="feature_selection_table">Feature-</a> und <a
+										class="jump_forward"
+										data-jump_elm_id="post_processing_table">Post-Processing</a>-Selektion.</li>
+								<li><img class="svg_icon" src="images/NewDataTable.svg" />vorkonfigurierten Daten- oder
+									Show-Layer neu anlegen
+								</li>
+							</ul>
+						</div>
+					</div>
+				</div>
+				<div class="p_3" data-toggle_elm_id="measurement_content" data-toggle_icon_id="measurement_icon"
+					id="measurement">
+					<h3><span id="measurement_icon"></span>Messung</h3>
+					<div class="p_4" id="measurement_content">
+
+						<div class="p_5">
+							<table class="compare">
+								<tr>
+									<th colspan="3" class="blank">Ablauf:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ol>
+											<li>Dialog: Karteikarte "Messung" öffnen</li>
+											<li>Dialog: Button [<img class="svg_icon"
+													src="images/linear_referencing_point.svg" /> Neue
+												Messung] betätigen</li>
+											<li>Canvas: Maus-Cursor über Referenz-Linie bewegen <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;laufende Ausgabe der Messwerte (Referenz-Feature und
+												Stationierungen)
+											</li>
+											<li>Canvas: Klick auf Referenz-Linie <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;Messwerte im Dialog fixieren<br />
+												➞&nbsp;Messpunktgrafik auf Karte anzeigen<br />
+												➞&nbsp;Messung beendet</li>
+
+											<li>Maus-Klick auf Karte oder [<img class="svg_icon"
+													src="images/linear_referencing_point.svg" /> Neue Messung
+												] zur Fortsetzung</li>
+										</ol>
+									</td>
+									<td>
+										<ol>
+											<li>Dialog: Karteikarte "Messung" öffnen</li>
+											<li>Dialog: Button [<img class="svg_icon"
+													src="images/re_digitize_lol.svg" /> Neue
+												Messung] betätigen</li>
+											<li>Canvas: Maus-Cursor über Referenz-Linie bewegen <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;laufende Ausgabe der Von-Messwerte
+												(Referenz-Feature und Stationierungen)</li>
+											<li>Canvas: MouseDown auf Referenz-Feature <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup>, Maustaste halten<br />
+												➞&nbsp;Von-Messung anhalten<br />
+												➞&nbsp;Referenz-Feature fixieren<br />
+												➞&nbsp;Von-Messwerte im Dialog fixieren<br />
+												➞&nbsp;Von-Messpunktgrafik auf Karte anzeigen
+											</li>
+											<li>Canvas: MouseMove mit gehaltener Maustaste auf Referenz-Linie <sup
+													class="sup_flyout" data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;laufende Ausgabe der Bis- und Differenz-Messwerte<br />
+												➞&nbsp;Bis-Messpunktgrafik und Segmentlinie auf Karte anzeigen</li>
+											<li>Canvas: MouseUp auf fixiertem Referenz-Feature <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;Bis-Messung anhalten<br />
+												➞&nbsp;alle Messwerte im Dialog fixieren<br />
+												➞&nbsp;Segment-Messung beendet</li>
+											<li>erneutes Maus-Down/Move/Up auf Referenz-Linie oder [<img
+													class="svg_icon" src="images/re_digitize_lol.svg" /> Neue Messung
+												] zur Fortsetzung</li>
+										</ol>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">Ergebnis</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td style="text-align: center;"><img
+											src="./images/2024-08-12 PoL Measure Results de.png"
+											style="width: 700px;" /></td>
+
+									<td style="text-align: center;"><img
+											src="./images/2024-09-04 LoL Measure Results de.png"
+											style="width: 700px;" /></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ol>
+											<li>selektiertes Referenz-Feature <img class="svg_icon"
+													src="images/mActionIdentify.svg" />
+												Datensatz-Formular öffnen <img class="svg_icon"
+													src="images/mIconZoom.svg" />
+												Zoom
+												auf
+												Feature</li>
+											<li>Cursor- und Snap-Koordinaten X/Y</li>
+											<li>absoluter natürlicher Abstand zum Start-Punkt der Referenzlinie<br />
+												editierbar via Spin-Buttons <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup> oder
+												mittels numerischer Eingabe
+											</li>
+											<li>relativer natürlicher Abstand zum Start-Punkt der Referenzlinie
+												(in Prozent, editierbar via Spin-Buttons oder mittels numerischer
+												Eingabe)</li>
+											<li>absoluter M-Abstand zum Start-Punkt der Referenzlinie<br />
+												editierbar via Spin-Buttons <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup> oder mittels
+												numerischer Eingabe <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>relativer M-Abstand zum Start-Punkt der Referenzlinie (in Prozent,
+												editierbar via Spin-Buttons oder mittels numerischer Eingabe)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>interpolierter Z-Wert <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_z"></sup></li>
+											<li>Folgefunktionen:<br />
+												<img class="svg_icon" src="images/mActionTrippleArrowLeft.svg" /> Punkt
+												auf Anfang der Referenzlinie setzen<br />
+												<img class="svg_icon" src="images/mActionArrowLeft.svg" /> Punkt in
+												Richtung
+												Startpunkt verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup><br />
+												<img class="svg_icon" src="images/insert_record.svg" /> Insert: neuen
+												Datensatz
+												anlegen <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup><br />
+												<img class="svg_icon" src="images/mActionFileSave.svg" /> Update:
+												selektierten
+												Datensatz (Feature-ID wird angezeigt) speichern
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_feature_selected"></sup><br />
+												<img class="svg_icon" src="images/linear_referencing_point.svg" /> Neue
+												Messung:
+												Dialog zurücksetzen und neue Messung starten<br />
+												<img class="svg_icon" src="images/mActionArrowRight.svg" /> Punkt in
+												Richtung
+												Endpunkt verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup><br />
+												<img class="svg_icon" src="images/mActionTrippleArrowRight.svg" /> Punkt
+												auf Ende der Referenzlinie setzen<br />
+												<img class="svg_icon" src="images/mIconZoom.svg" /> auf Punkt
+												zoomen<br />
+												<img class="svg_icon" src="images/move_lol_from.svg" /> Punkt auf
+												selektierter
+												Referenzlinie interaktiv verschieben<br />
+											</li>
+										</ol>
+									</td>
+
+									<td>
+										<ol>
+											<li>selektiertes Referenz-Feature <img class="svg_icon"
+													src="images/mActionIdentify.svg" />
+												Datensatz-Formular öffnen <img class="svg_icon"
+													src="images/mIconZoom.svg" />
+												Zoom
+												auf
+												Feature</li>
+											<li>Cursor-Koordinaten Von/Bis X/Y<br />
+												Eingabefeld für Abstand des Segmentes zur Referenz-Linie <sup
+													class="sup_flyout" data-flyout_id="sup_offset"></sup><br />
+												<img class="svg_icon" src="images/linear_referencing_point.svg" /> ➞
+												Von-Punkt verschieben<br />
+												<img class="svg_icon" src="images/linear_referencing_to_point.svg" /> ➞
+												Bis-Punkt verschieben<br />
+												Snap-Koordinaten Von/Bis X/Y
+											</li>
+											<li>absoluter natürlicher Abstand Von/Bis zum Start-Punkt der Referenzlinie
+												und Differenz<br />
+												editierbar via Spin-Buttons <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup> oder
+												mittels numerischer Eingabe
+											</li>
+											<li>relativer natürlicher Abstand Von/Bis zum Start-Punkt der Referenzlinie
+												und Differenz
+												(in Prozent, editierbar via Spin-Buttons oder mittels numerischer
+												Eingabe)
+											</li>
+											<li>absoluter M-Abstand Von/Bis zum Start-Punkt der Referenzlinie und
+												Differenz<br />
+												editierbar via Spin-Buttons <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup> oder
+												mittels numerischer Eingabe <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>relativer M-Abstand Von/Bis zum Start-Punkt der Referenzlinie und
+												Differenz (in Prozent, editierbar via Spin-Buttons oder mittels
+												numerischer Eingabe)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>interpolierte Z-Werte Von/Bis und Differenz <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_z"></sup></li>
+											<li>Folgefunktionen:<br />
+												<img class="svg_icon" src="images/mActionTrippleArrowLeft.svg" />
+												Segment
+												auf Anfang der Referenzlinie setzen<br />
+												<img class="svg_icon" src="images/mActionDoubleArrowLeft.svg" /> Segment
+												Richtung Anfang flippen (altes Von&nbsp;➞&nbsp;neues Bis)<br />
+												<img class="svg_icon" src="images/mActionArrowLeft.svg" /> Segment
+												Richtung Anfang verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup><br />
+												<img class="svg_icon" src="images/insert_record.svg" /> Insert: neuen
+												Datensatz anlegen <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup><br />
+												<img class="svg_icon" src="images/mActionFileSave.svg" /> Update:
+												selektierten Datensatz (Feature-ID wird angezeigt) speichern
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup> <sup
+													class="sup_flyout"
+													data-flyout_id="sup_requires_data_feature_selected"></sup><br />
+												<img class="svg_icon" src="images/linear_referencing_point.svg" /> Neue
+												Messung: Dialog zurücksetzen und neue Messung starten<br />
+												<img class="svg_icon" src="images/mActionArrowRight.svg" /> Segment
+												Richtung Ende verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup><br />
+												<img class="svg_icon" src="images/mActionDoubleArrowRight.svg" />
+												Segment
+												Richtung Ende flippen (altes Bis&nbsp;➞&nbsp;neues Von)<br />
+												<img class="svg_icon"
+													src="images/mActionTrippleArrowRight.svg" />Segment
+												auf Ende der Referenzlinie setzen<br />
+												<img class="svg_icon" src="images/move_segment.svg" /> Segment auf
+												selektierter Referenzlinie interaktiv verschieben<br />
+												<img class="svg_icon" src="images/change_offset.svg" /> Abstand Segment
+												zur Referenzlinie interaktiv setzen <sup class="sup_flyout"
+													data-flyout_id="sup_offset"></sup><br />
+												<img class="svg_icon" src="images/mIconZoom.svg" /> auf Segment
+												zoomen<br />
+											</li>
+										</ol>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<div class="notes">
+											Anstelle der interaktiven Messung kann auch eine Referenzlinie im
+											Dialog selektiert und die numerische(n) Stationierung(en) manuell
+											eingegeben werden.
+										</div>
+									</td>
+								</tr>
+							</table>
+						</div>
+					</div>
+				</div>
+
+				<div class="p_3" data-toggle_elm_id="feature_selection_content"
+					data-toggle_icon_id="feature_selection_icon" id="feature_selection">
+					<h3>
+						<span id="feature_selection_icon"></span>Feature-Auswahl
+					</h3>
+
+
+					<div id="feature_selection_content">
+						In dieser Tabelle kann eine benutzerdefinierbare Auswahl an Datensätzen bearbeitet, visualisiert
+						und interaktiv editiert werden.
+						<div class="p_4">
+							<table class="compare">
+								<tr>
+									<th colspan="3" class="blank">Ablauf:</th>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										Dialog: Karteikarte "Feature-Auswahl" öffnen:<br />
+										<img src="./images/2024-09-03 LoL Feature Selection Select Buttons de.png"
+											style="width: 600px; margin: 10px; margin-left: 50px;" /><br />
+										<ul>
+											<li>[<img class="svg_icon"
+													src="images/mActionEditIndentMore.svg" />Data-Layer]&nbsp;➞&nbsp;
+												Datensätze aus Datenlayer übernehmen <sup class="sup_flyout"
+													data-flyout_id="sup_replace_expand_selection_ctrl_shift"></sup></li>
+											<li>[<img class="svg_icon" src="images/mActionEditIndentMore.svg" />
+												Show-Layer]&nbsp;➞&nbsp;
+												Datensätze aus Show-Layer übernehmen <sup class="sup_flyout"
+													data-flyout_id="sup_replace_expand_selection_ctrl_shift"></sup> <sup
+													class="sup_flyout" data-flyout_id="sup_requires_show_layer"></sup>
+											</li>
+
+											<li><img class="svg_icon" src="images/mActionOpenTable.svg" />&nbsp;➞&nbsp;
+												öffnet die Tabelle des Daten- oder Show-Layers <sup class="sup_flyout"
+													data-flyout_id="sup_requires_show_layer"></sup>, Selektion von dort
+												aus
+												via <a class="jump_forward"
+													data-jump_elm_id="feature_selection_from_table">Feature-Auswahl
+													aus Attribut-Formularen und Tabellen</a>
+											</li>
+											<li><img class="svg_icon"
+													src="images/select_point_features.svg" />&nbsp;➞&nbsp;
+												interaktive Selektion auf Karte <sup class="sup_flyout"
+													data-flyout_id="sup_map_select_unselect_ctrl_shift"></sup> <sup
+													class="sup_flyout" data-flyout_id="sup_requires_show_layer"></sup>
+											</li>
+										</ul>
+
+
+									</td>
+
+								<tr>
+									<th colspan="3" class="blank">Ergebnis:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr id="feature_selection_table">
+									<td class="blank"></td>
+									<td style="text-align: center;"><img style="width: 600px;"
+											src="images/2024-08-13 PoL Feature Selection Filled de.png" />
+									</td>
+									<td style="text-align: center;">
+										<img style="width: 700px;"
+											src="images/2024-09-03 LoL Feature Selection de.png" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ul>
+
+											<li><img class="svg_icon" src="images/backspace.svg" /> Datensatz aus
+												Feature-Auswahl entfernen</li>
+											<li><img class="svg_icon"
+													src="images/mActionIdentify.svg" />Datensatz-Formular öffnen
+											</li>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" />Feature auf Karte
+												anzeigen
+												<sup class="sup_flyout" data-flyout_id="sup_pan_zoom_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon"
+													src="images/mActionInvertSelection.svg" />Datensatz im Layer
+												selektieren
+												<sup class="sup_flyout"
+													data-flyout_id="sup_select_unselect_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon"
+													src="images/mActionDeleteSelectedFeatures.svg" />Datensatz
+												löschen
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_pol_feature.svg" />Feature auf
+												Referenzlinie verschieben (Stationierung)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/reposition_pol_feature.svg" />Feature
+												neu positionieren (Referenz + Stationierung)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+
+										</ul>
+									</td>
+
+									<td>
+										<ul>
+
+											<li><img class="svg_icon" src="images/backspace.svg" /> Datensatz aus
+												Feature-Auswahl entfernen</li>
+											<li><img class="svg_icon"
+													src="images/mActionIdentify.svg" />Datensatz-Formular öffnen
+											</li>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" />Feature auf Karte
+												anzeigen
+												<sup class="sup_flyout" data-flyout_id="sup_pan_zoom_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon"
+													src="images/mActionInvertSelection.svg" />Datensatz im Layer
+												selektieren
+												<sup class="sup_flyout"
+													data-flyout_id="sup_select_unselect_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon"
+													src="images/mActionDeleteSelectedFeatures.svg" />Datensatz
+												löschen
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_segment.svg" />Feature auf
+												Referenzlinie verschieben (Stationierung)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/re_digitize_lol.svg" />Feature
+												neu positionieren (Referenz + Stationierung)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_pol_feature.svg" />Von-Punkt auf
+												Referenzlinie verschieben
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon"
+													src="images/linear_referencing_to_point.svg" />Bis-Punkt auf
+												Referenzlinie verschieben
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/change_offset.svg" />Abstand Segment
+												zur Referenzlinie ändern
+												<sup class="sup_flyout" data-flyout_id="sup_offset"></sup> <sup
+													class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<div class="p_xxx">
+											Klick auf Tabellenzeile&nbsp;➞&nbsp;Feature selektieren und in Karte
+											anzeigen, Metadaten im Messung-Tab anzeigen <sup class="sup_flyout"
+												data-flyout_id="sup_select_unselect_zoom_ctrl_shift_dbl"></sup></div>
+
+										<div class="p_xxx">Für die textlichen Inhalte der Tabelle wird die
+											QGis-Layer-Eigenschaft "Anzeigename" des Referenz-, Daten- und Show-Layers
+											verwendet.
+											Zugriff auf diese Eigenschaft über den Standard-Dialog oder in den
+											Plugin-Einstellungen via [<img class="svg_icon"
+												src="images/mIconExpression.svg" />]-Buttons</div>
+										<div class="p_xxx">für die Anzeigegenaugkeit der Stationierungen siehe <a
+												class="jump_forward" data-jump_elm_id="precision">Genauigkeit</a> in den
+											Daten-Layer-Einstellungen
+										</div>
+										<div class="p_xxx">
+											Fehlerhafte Features werden mit roter Textfarbe gekennzeichnet, die
+											Fehlerursache wird im FlyOut angegeben</div>
+										<div class="notes">
+											Hinweis:<br />
+											Das Plugin bewertet Datensätze mit Stationierungen außerhab des
+											Wertebereiches als "fehlerhaft", da sie zu fehlerhaften
+											Berechnungsergebnissen führen können (z. B. falsche Abschnittslängen
+											aus der Differenz der Nabs-Von-Bis-Stationierungen).<br />
+											Im Show-Layer werden diese aber dargestellt und auf Anfang/Ende der
+											zugeordneten Referenz-Linie positioniert.
+										</div>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">Folgefunktionen:</th>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<ul>
+											<li>[<img class="svg_icon" src="images/mActionPanToSelected.svg" /> Auf
+												Selektion
+												zoomen]</li>
+											<li>[<img class="svg_icon" src="images/mActionDeselectActiveLayer.svg" />
+												Liste leeren]
+											</li>
+											<li>[<img class="svg_icon" src="images/mActionInvertSelection.svg" />
+												Selektion im
+												Layer]&nbsp;➞&nbsp;Selektiert Features in Daten- und Show-Layer <sup
+													class="sup_flyout"
+													data-flyout_id="sup_select_unselect_ctrl_shift"></sup>
+
+											</li>
+											<li>[<img class="svg_icon" src="images/mActionFilter2.svg" /> Selektion als
+												Filter]&nbsp;➞&nbsp;Selektion als Filter für Daten-Layer und Show-Layer
+												verwenden <sup class="sup_flyout"
+													data-flyout_id="sup_remove_filter_ctrl"></sup>
+
+											</li>
+										</ul>
+									</td>
+								</tr>
+
+							</table>
+						</div>
+
+						<div class="p_4" id="feature_selection_from_table">
+							<h4>Feature-Auswahl aus Attribut-Formularen und Tabellen:</h4>
+							Mittels vom Plugin registrierter "Layer-Aktionen" können Datensätze von Daten- und
+							Show-Layer aus
+							Formularen/Tabellen heraus selektiert werden:
+							<img class="sized_block_image" src="images/2024-09-03 PoL Layer Action Table de.png"
+								style="width: 800px;" />
+							<img class="sized_block_image" src="images/2024-09-03 PoL Layer Action Form de.png"
+								style="width: 500px;" />
+						</div>
+					</div>
+				</div>
+				<div class="p_3" data-toggle_elm_id="post_processing_content" data-toggle_icon_id="post_processing_icon"
+					id="post_processing">
+					<h3>
+						<span id="post_processing_icon"></span>Post-Processing
+					</h3>
+					<div id="post_processing_content">
+						Änderungen an den Referenz-Geometrien können sich auf die Lage linear referenzierter Datensätze
+						auswirken, siehe <a class="jump_forward" data-jump_elm_id="lr_mode_compare">Auswirkung von
+							Änderungen
+							der Referenzgeometrie</a><br />
+						Maßgeblich ist:
+						<ul>
+							<li>die Art der Referenz-Geometrie-Änderung (Geometrie-Verschiebung, Vertex
+								verschieben/hinzufügen/löschen)</li>
+							<li>der <a class="jump_forward" data-jump_elm_id="lr_modes">LR-Modus</a></li>
+							<li>die Lage der Geometrie-Änderung in Bezug zur referenzierten Position auf der
+								Referenzlinie</li>
+						</ul>
+
+						<div class="p_4">
+							<h4>Beispiel:</h4>
+
+							Nach Gewässer-Renaturierungen wurde der ursprüngliche Gewässerverlauf in QGis
+							bearbeitet, was unbeabsichtigt die Lage in einigen anderen Layern änderte...<br />
+
+							<h5>Ausgangslage:</h5>
+							<ul>
+								<li>Referenz-Layer mit Gewässerverläufen</li>
+								<li>PoL-Layer: Bauwerke an Gewässern (Brücken, Durchlässe...)</li>
+								<li>LoL-Layer: Abschnitte im Gewässerumfeld (angrenzende Nutzungen)</li>
+								<li>LR-Modus "Nabs" (natürliche Stationierung)</li>
+								<li>Referenz-Layer und linear referenzierte Layer im gleichen QGis-Projekt</li>
+								<li>der Plugin-Dialog wurde <b>vor</b> dem Editieren des Referenzlayers aufgerufen
+									(Initialisierung)</li>
+							</ul>
+
+
+							<table class="compare">
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">vorher:</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td style="text-align: center;">
+										<img src="images/2024-08-27 PoL PostProcessing Sample 1.png"
+											style="width:800px;" />
+									</td>
+									<td style="text-align: center;">
+										<img src="images/2024-09-04 LoL PostProcessing Sample 1.png"
+											style="width:400px;" />
+									</td>
+
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">nachher:</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td style="text-align: center;">
+										<img src="images/2024-08-27 PoL PostProcessing Sample 2.png"
+											style="width:800px;" />
+									</td>
+									<td style="text-align: center;">
+										<img src="images/2024-09-04 LoL PostProcessing Sample 2.png"
+											style="width:400px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										die in Digitalisier-Richtung folgenden Punkte haben sich um das Maß der
+										Laufverlängerung in Richtung Mündung verschoben, vorangehende Punkte sind
+										bei "Nabs" nicht betroffen
+									</td>
+									<td>
+										das von der Laufverlängerung direkt betroffenen Segment passt sich dem neuen
+										Verlauf an, die in Digitalisier-Richtung folgenden Segmente haben sich um das
+										Maß der Laufverlängerung in Richtung Mündung verschoben, vorangehende Segmente
+										sind bei "Nabs" nicht betroffen
+									</td>
+								</tr>
+
+								<tr>
+									<th colspan="3" class="blank">Post-Processing-Dialog-Ausgabe:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr id="post_processing_table">
+									<td class="blank"></td>
+									<td style="text-align: center;"><img
+											src="images/2024-08-27 PoL PostProcessing Sample 3.png"
+											style="width:600px;" /></td>
+									<td style="text-align: center;"><img
+											src="images/2024-09-04 LoL PostProcessing Sample 3.png"
+											style="width:600px;" /></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ul>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" />Shape
+												highlighten <sup class="sup_flyout"
+													data-flyout_id="sup_pan_zoom_ctrl_shift"></sup></li>
+											<li><img class="svg_icon"
+													src="images/mActionIdentify.svg" />Datensatz-Formular öffnen
+											</li>
+											<li><img class="svg_icon" src="images/previous_line.svg" />Änderungen im
+												Referenzlayer grafisch anzeigen <sup class="sup_flyout"
+													data-flyout_id="sup_zoom_shift"></sup></li>
+											<li><img class="svg_icon" src="images/backspace.svg" />Zeile aus Tabelle
+												entfernen (beendet dessen Post-Processing)
+											</li>
+											<li><img class="svg_icon" src="images/move_pol_feature.svg" />Shape
+												interaktiv verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup></li>
+											<li><img class="svg_icon" src="images/mActionDeleteSelectedFeatures.svg" />
+												Datenatz löschen <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup> </li>
+										</ul>
+									</td>
+									<td>
+										<ul>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" />Shape
+												highlighten <sup class="sup_flyout"
+													data-flyout_id="sup_pan_zoom_ctrl_shift"></sup></li>
+											<li><img class="svg_icon"
+													src="images/mActionIdentify.svg" />Datensatz-Formular öffnen
+											</li>
+											<li><img class="svg_icon" src="images/previous_line.svg" />Änderungen im
+												Referenzlayer grafisch anzeigen <sup class="sup_flyout"
+													data-flyout_id="sup_zoom_shift"></sup></li>
+											<li><img class="svg_icon" src="images/backspace.svg" />Zeile aus Tabelle
+												entfernen (beendet dessen Post-Processing)
+											</li>
+											<li><img class="svg_icon" src="images/move_segment.svg" />Shape
+												interaktiv verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup></li>
+											<li><img class="svg_icon" src="images/mActionDeleteSelectedFeatures.svg" />
+												Datenatz löschen <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup></li>
+											<li><img class="svg_icon" src="images/move_lol_from.svg" />
+												Von-Punkt verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup></li>
+											<li><img class="svg_icon" src="images/move_lol_to.svg" />
+												Bis-Punkt verschieben <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup></li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<div class="p_xxx">
+											Klick auf Tabellenzeile&nbsp;➞&nbsp;Feature selektieren und in Karte
+											anzeigen<sup class="sup_flyout"
+												data-flyout_id="sup_select_unselect_zoom_ctrl_shift_dbl"></sup></div>
+
+										<div class="p_xxx">Für die textlichen Inhalte der Tabelle wird die
+											QGis-Layer-Eigenschaft "Anzeigename" des Referenz- und Daten-Layers
+											verwendet. Zugriff auf diese Eigenschaft über den Standard-Dialog oder in
+											den Plugin-Einstellungen via [<img class="svg_icon"
+												src="images/mIconExpression.svg" />]-Buttons</div>
+										<div class="p_xxx">für die Anzeigegenaugkeit der Stationierungen siehe <a
+												class="jump_forward" data-jump_elm_id="precision">Genauigkeit</a> in den
+											Daten-Layer-Einstellungen
+										</div>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">Folgefunktionen:</th>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" style="margin-left:20%; margin-right:20%;">
+										<ul>
+											<li>[<img class="svg_icon" src="images/mActionPanToSelected.svg" /> Auf
+												Selektion zoomen]</li>
+											<li>[<img class="svg_icon" src="images/mActionDeselectActiveLayer.svg" />
+												Liste Leeren] (beendet Post-Processing)</li>
+
+										</ul>
+									</td>
+								</tr>
+							</table>
+
+
+							<div class="notes">
+								Hinweis:<br />
+								Die Anzahl der Post-Processing-Datensätze ist aus Kapazitätsgründen auf 100
+								geänderte Referenz-Linien und insgesamt 500 linear referenzierte
+								Datensätze begrenzt.
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="p_4" data-initially_open="0" data-toggle_elm_id="note_development_content"
+			data-toggle_icon_id="note_development_icon" id="note_development">
+			<h4><span id="note_development_icon"></span>Entwicklung und Unterstützung</h4>
+			<div class="p_4" id="note_development_content">
+				<table class="invisible">
+					<tr>
+						<td>Author:</td>
+						<td>Ludwig Kniprath</td>
+					</tr>
+					<tr>
+						<td>Mailto:</td>
+						<td>ludwig[at]kni-online.de</td>
+					</tr>
+					<tr>
+						<td>Version:</td>
+						<td>2.0.0 (2024-09)</td>
+					</tr>
+					<tr>
+						<td colspan="2">Das Plugin wird unter der jeweils aktuellen QGis Version entwickelt, derzeit
+							QGIS 3.38.3 'Grenoble' und QGIS 3.34.10 'Prizren' (LTR).</td>
+					</tr>
+					<tr>
+						<td colspan="2">Quell-Code und Tracker unter <a
+								href="https://github.com/Ludwig-K/QGisLinearReference/"
+								target="_blank">https://github.com/Ludwig-K/QGisLinearReference/</a>
+						</td>
+					</tr>
+					<tr>
+						<td colspan="2">Das Project steht unter der GNU GPL 2-Lizenz.</td>
+					</tr>
+				</table>
+			</div>
+		</div>
+	</div>
+
+	<div id="back_to_jump">
+		<a id="back_to_jump_first" title="Anfang...">&lt;&lt;</a>&nbsp;&nbsp;&nbsp;
+		<a id="back_to_jump_back" title="Zurück...">&lt;</a>&nbsp;&nbsp;&nbsp;&nbsp;
+		<a id="back_to_jump_for" title="Vor...">&gt;</a>&nbsp;&nbsp;&nbsp;
+		<a id="back_to_jump_last" title="Ende...">&gt;&gt;</a>
+	</div>
+
+</body>
+
+</html>

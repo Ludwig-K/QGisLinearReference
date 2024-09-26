@@ -1,0 +1,1494 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta content="text/html;charset=utf-8" http-equiv="content-type">
+	<link href='./index.css' rel='stylesheet' type='text/css' />
+	<script src='./index.js' type='text/javascript'></script>
+	<title>QGis-Plugin Linear Referencing</title>
+	<link rel="icon" href="./images/linear_referencing.svg" />
+</head>
+
+<body onload='init();'>
+	<div id="language_select">
+		<a href="index.de.html" title="language DE"><img
+				style="width: 30px; height: 20px; border: 2px solid transparent;"
+				src="images/Flag_of_Germany.svg" /></a>
+		<a href="index.en.html" title="language UK"><img style="width: 30px; height: 20px; border: 2px solid silver;"
+				src="images/Flag_of_UK.svg" /></a>
+	</div>
+	<div class="p_1" id="top">
+		<h1>Linear Referencing</h1>
+		The QGis-Plugin "LinearReferencing" supports the measurement of points/sections on reference lines
+		and the acquisition of linearly referenced data sets.
+		<div class="p_2" data-initially_open="1" data-toggle_elm_id="toc_content" data-toggle_icon_id="toc_icon"
+			id="toc">
+			<h2>
+				<span id="toc_icon"></span>Contents
+			</h2>
+			<div class="p_0"></div>
+			<ul id="toc_content">
+				<li><a class="jump_forward" data-jump_elm_id="basics">Principle of linear referencing</a>
+					<ul>
+						<li><a class="jump_forward" data-jump_elm_id="necessary_layers">Required layers</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="lr_modes">LR-Modes</a>
+							<ul>
+								<li><a class="jump_forward" data-jump_elm_id="lr_mode_compare">Effects of changes
+										of the reference geometry</a>
+								</li>
+								<li><a class="jump_forward" data-jump_elm_id="lr_conversion">Conversion</a></li>
+							</ul>
+						</li>
+					</ul>
+				</li>
+				<li><a class="jump_forward" data-jump_elm_id="usage">Usage</a>
+					<ul>
+						<li><a class="jump_forward" data-jump_elm_id="settings">Settings</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="measurement">Measurement</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="feature_selection">Feature-Selection</a></li>
+						<li><a class="jump_forward" data-jump_elm_id="post_processing">Post-Processing</a></li>
+					</ul>
+				</li>
+				<li><a class="jump_forward" data-jump_elm_id="note_development">Development and support</a></li>
+			</ul>
+		</div>
+		<div class="p_2" data-toggle_elm_id="basics_content" data-toggle_icon_id="basics_icon" id="basics">
+			<h2>
+				<span id="basics_icon"></span>Principle of linear referencing
+			</h2>
+			<div class="p_3" id="basics_content">
+				<b>"Normal"</b> vector layers save geometrys using numerical coordinates.<br />
+				<b>"Linearly referenced"</b> layers use numerical stationing on assigned reference lines:
+
+				<table class="compare">
+					<tr>
+						<td>Linear referenced <b>Point</b>-Layer<br />
+							(<i>"PoL"</i>, Point-on-Line)</td>
+						<td>Linear referenced <b>Line</b>-Layer<br />
+							(<i>"LoL"</i>, Line-on-Line)</td>
+					</tr>
+					<tr>
+						<td>One point per record with reference line assignment and stationing</td>
+						<td>
+							One line segment per record with reference line assignment, two stationings
+							(From...To)<br />
+							and an additional offset defining the distance from segment to reference line <sup
+								class="sup_flyout" data-flyout_id="sup_offset"></sup>
+						</td>
+					</tr>
+					<tr>
+						<td>f.e. Structures on a watercourse:<br /><img src="images/2024-09-02 PoL Sample de.png"
+								style="width:700px;" /></td>
+						<td>f.e. Segments on a watercourse:<br /><img src="images/2024-09-02 LoL Sample de.png"
+								style="width:800px;" /></td>
+					</tr>
+				</table>
+
+				<div id="necessary_layers" class="p_4">
+					<h4>Required layers</h4>
+					The plugin uses three layers to capture and display a linearly referenced dataset:
+					<div id="reference_layer" class="p_5">
+						<h5>Reference-Layer</h5>
+						On the Linestring-Geometries of this layer the assigned linearly referenced features are
+						numerically
+						positioned.
+						<ul>
+							<li>Vectorlayer</li>
+							<li>QGis-supported format (GeoPackage, SQLite, SpatiaLite, Shape,
+								Geo-Database...)
+							</li>
+							<li>Type LineString (LineString, LineStringM, LineStringZ, LineStringZM, MultiLineString,
+								MultiLineStringM, MultiLineStringZ, MultiLineStringZM)</li>
+							<li>Any projection</li>
+							<li>unique ID-Field required</li>
+							<li>unique Digitizing direction
+								<div class="notes">
+									In the examples of watercourses shown here, digitization is generally carried out
+									<b>against</b> flow-direction.
+								</div>
+							</li>
+							<li><a class="jump_forward" data-jump_elm_id="lr_modes">LR-Mode</a> "Nabs" and
+								"Nfract":
+								<ul>
+									<li>Multi layer types possible, but only one-piece geometrys or multi-part and
+										consecutive without gaps supported</li>
+								</ul>
+							</li>
+
+							<li><a class="jump_forward" data-jump_elm_id="lr_modes">LR-Mode</a> "Mabs":
+								<ul>
+									<li>Reference layer type with M-values</li>
+									<li>M-Values strictly ascending (see <a
+											href="https://www.gaia-gis.it/gaia-sins/spatialite-sql-latest.html"
+											target="_blank" target="_blank">SpatiaLite</a>, functions
+										ST_IsValidTrajectory and ST_TrajectoryInterpolatePoint)
+									</li>
+									<li>Multi layer types possible, but only one-piece geometrys supported</li>
+								</ul>
+							</li>
+						</ul>
+
+						<div class="notes">
+							<b>Note on snapping:</b><br />
+							The plugin applies "Advanced Configuration", Type "Segment, Line-Endpoints" and a tolerance
+							of 10px to the registered reference layer.
+						</div>
+
+					</div>
+
+					<div id="data_layer" class="p_5">
+						<h5>Data-Layer</h5>
+						Stores assignments to reference layer, stationing(s) and any other informations.
+						<ul>
+							<li>geometryless vector layer</li>
+							<li>QGis-supported formats (dBase, GeoPackage, SQLite, SpatiaLite, database,
+								office spreadsheets)</li>
+						</ul>
+					</div>
+
+					<div id="show_layer" class="p_5">
+						<h5>Show-Layer</h5>
+						Cartographic representation of the linearly referenced features.
+						<ul>
+							<li>virtual layer</li>
+							<li>SQL-query using reference- and data layer</li>
+							<li>SpatiaLite expression in query calculates geometrys (possibly less performant)</li>
+							<li>Projection according to reference layer</li>
+							<li>runs independend from plugin</li>
+						</ul>
+					</div>
+
+					<div class="notes">
+						Notes:
+						<ul>
+							<li>Without data- or show-layer the plugin can still be used for measuring.</li>
+							<li>Changes to data or reference layer (fields renamed/deleted/added) or the plugin-settings
+								(registered layers/fields, LR-Mode...) can harm the SQL-query of the virtual layer,
+								revise query if necessary or create a new one</li>
+						</ul>
+
+					</div>
+
+				</div>
+
+
+				<div id="lr_modes" class="p_4">
+					<h4>"LR-Mode"</h4>
+					The position of a point on a line can be described numerically in various ways:
+					<ul>
+						<li>Running length absolute</li>
+						<li>Running length relative to total length</li>
+						<li>Running length as percentage of total length</li>
+						<li>referencing start of line</li>
+						<li>referencing end of line</li>
+						<li>by use of Vertex-M-Values</li>
+						<li>as vector-layer (without linear referencing)</li>
+						<li>mixed, f.e. stationings calculated from point layer snapped to reference layer</li>
+						<li>...</li>
+					</ul>
+
+					The plugin implements the variants
+					<ul>
+						<li><i>"Nabs"</i><br />
+							absolute natural stationing (running length to startpoint of assigned reference line)<br />
+							Value range: 0 ... length of line
+						</li>
+						<li><i>"Nfract"</i><br />
+							relative natural stationing (running length/total length)<br />
+							Value range: 0 ... 1
+						</li>
+						<li><i>"Mabs"</i> <sup class="sup_flyout"
+								data-flyout_id="sup_requires_linestring_m"></sup><br />
+							M-stationing (using Vertex-M-values)<br />
+							Value range: M-values first ... last vertex of assigned reference line
+						</li>
+					</ul>
+
+
+
+					<div class="p_4" data-toggle_elm_id="compare_content" data-toggle_icon_id="compare_icon"
+						id="lr_mode_compare">
+						<h4>
+							<span id="compare_icon"></span>Effects of reference geometry changes on linear referenced
+							geometrys
+						</h4>
+
+						<div class="p_5" id="compare_content">
+							(see <a class="jump_forward" data-jump_elm_id="post_processing">Post-Processing</a>)
+							<table class="compare">
+								<tr>
+									<th colspan="4" style="border-style: none;">Example reference geometry:</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="3">
+
+										<img src="images/2024-09-21 sample_line_1.png" style="width:1000px;" />
+										<ul>
+											<li>LinestringM</li>
+											<li>Vertices vertically at one height, horizontal distance 10m</li>
+											<li>M-Value == Vertex-Index</li>
+											<li>WKT
+												<pre
+													class="code">LineStringM (310900 5650000 0, 310910 5650000 1, 310920 5650000 2, 310930 5650000 3, 310940 5650000 4, 310950 5650000 5, 310960 5650000 6, 310970 5650000 7, 310980 5650000 8, 310990 5650000 9, 311000 5650000 10)</pre>
+											</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Example LoL-Layer:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<td colspan="3">
+										<ul>
+											<li><b>one</b> data-layer for <b>three</b> LR-Modes</li>
+											<li>Sections 1 to 10 start/end on the vertices</li>
+											<li>Sections 11 to 15 subdivide section 7</li>
+										</ul>
+
+										<img src="images/2024-09-21 sample_lol_data.png" style="width:1000px;" /><br />
+										(identical presentation for the three show-layers regardless of LR-mode)<br />
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Demo-edit of the reference-geometry:
+									</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<td colspan="3">
+										Vertex 6 moved 25 meters to the north:<br />
+										<img src="images/2024-09-21 sample_line_2.png" style="width:1000px;" />
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Effects on the to linear referenced
+										geometries:</th>
+								</tr>
+								<tr></tr>
+								<th class="blank"></th>
+								<th class="nabs">Nabs</th>
+								<th class="nfract">Nfract</th>
+								<th class="mabs">Mabs</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs"><img src="images/2024-09-21 sample_nabs_2.png"
+											style="width:700px;" />
+									</td>
+									<td class="nfract"><img src="images/2024-09-21 sample_nfract_2.png"
+											style="width:700px;" /></td>
+									<td class="mabs"><img src="images/2024-09-21 sample_mabs_2.png"
+											style="width:700px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs">
+										<b>Auxiliary idea:</b><br />
+										<ul>
+											<li>The reference line vertices are a series of posts.</li>
+											<li>The referenced sections form a <b>rigid</b> rope and are color-coded on
+												it
+											</li>
+											<li>The rope is knotted to the <b>first</b> post and <b>slid over</b> the
+												other
+												posts</li>
+											<li>Post 6 is moved, the rope is too short, slides, the markings move in the
+												rear area, the last posts are no longer connected.</li>
+											<li>No change in the front area</li>
+											<li>The overall length of the rope and the spacing of the markings remain
+												unchanged</li>
+										</ul>
+									</td>
+									<td class="nfract">
+										<b>Auxiliary idea:</b><br />
+										<ul>
+											<li>The reference line vertices are a series of posts.</li>
+											<li>The referenced sections form an <b>elastic</b> cord and are color-coded
+												on
+												it</li>
+											<li>The rope is knotted to the <b>first and last</b> post and <b>slid
+													over</b>
+												the other posts</li>
+											<li>Post 6 is moved, the elastic rope extends evenly
+												and glides over all intermediate posts</li>
+											<li>All markers change their length and position</li>
+											<li>The overall length of the rope changes</li>
+											<li>The length ratios relative to the overall length stay retained</li>
+										</ul>
+									</td>
+									<td class="mabs">
+										<b>Auxiliary idea:</b>
+										<ul>
+											<li>The reference line vertices are a series of posts.</li>
+											<li>The referenced sections form an <b>elastic</b> cord and are color-coded
+												on
+												it</li>
+											<li>The rope is knotted to <b>all</b> posts</li>
+											<li>Post 6 is moved, the elastic rope extends in the area of posts 5, 6 and
+												7
+											</li>
+											<li>The areas outside posts 5, 6 and 7 remain unchanged</li>
+											<li>The overall length of the rope changes</li>
+											<li>All markings are still on the posts</li>
+											<li>The length ratios relative to the total length change</li>
+											<li>The length ratios between the posts remain unchanged</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="4" style="border-style: none;">Advantages/disadvantages (depending on
+										use case, without claim to completeness):</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs">
+										<b>Advantages:</b>
+										<ul>
+											<li>Classic representation for stationings</li>
+											<li>Easy to verify in GIS/nature (simply remeasure)</li>
+											<li>Comprehensible numerical editing (f.e. move all sections by a constant
+												amount)</li>
+											<li>Simple usage in calculations f.e. section length == difference from...to
+												stationing</li>
+											<li>Changes of trailing vertices without influence to stationings</li>
+										</ul>
+									</td>
+									<td class="nfract">
+										<b>Advantages:</b>
+										<ul>
+											<li>the mode of choice for relative use cases</li>
+											<li>easy relative positioning (0&nbsp;➞&nbsp;start ...
+												1&nbsp;➞&nbsp;ende of reference-line)</li>
+											<li>less depending on projection</li>
+										</ul>
+
+									</td>
+									<td class="mabs">
+										<b>Advantages:</b>
+										<ul>
+											<li>Reference geometry changes only affect linear referenced geometries
+												in the adjacent areas</li>
+											<li>Vertex-M-values independend from "natural" stationings (f.e. usage of
+												timestamps from GPS-recordings)</li>
+											<li>Vertex-M-values independend from projection (f.e. metric stationings for
+												a
+												WGS-84-reference layer)</li>
+											<li>less projection-dependent</li>
+											<li>stationings with offsets possible:
+												<ul>
+													<li>Offset &gt; 0: Continuation of stationing in another reference
+														shape
+														<img src="images/2024-09-22 linestring_m_sample 2.png"
+															style="width:500px;" />
+														<div class="notes">
+															here:<br />
+															Border crossing of the river "Rur" (Germany) to Netherland
+															("Roer") (the geometry parts DE/NL as separate data
+															records.)<br />
+															DE-reference point is not the border crossing, but a point
+															with Vertex-M == 0 in the Netherlands (see below).</div>
+													</li>
+													<li>Offset &lt; 0: Stationings not starting at first vertex
+														<img src="images/2024-09-22 linestring_m_sample.png"
+															style="width:500px;" />
+														<div class="notes">
+															here:<br />
+															Mouth of Rur/Roer into the following water body Maas/Meuse
+															in the Netherlands<br />
+															Reference point ist not the intersection of the (fictitious)
+															water axes, but but an (agreed) point with
+															Vertex-M == 0 on the shoreline.</div>
+													</li>
+												</ul>
+												<div class="notes">
+													<ul>
+														<li>The M values of the other vertices correspond to the
+															natural stationing + offset</li>
+														<li>Samples taken from <a
+																href="https://www.lanuv.nrw.de/umwelt/wasser/oberflaechengewaesserfluesse-and-seen/fliessgewaesser/gewaesser-stationierungskarte"
+																target="_blank">Gewässerstationierungskarte NRW</a>
+															(Water
+															stationing map of north-rhine westfalia)</li>
+													</ul>
+												</div>
+											</li>
+											<li>Areas with compressed/stretched positioning possible</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td class="nabs">
+										<b>Disadvantages:</b>
+										<ul>
+											<li>depending on projection: the positions are calculated using the
+												numerical and projected X/Y coordinates</li>
+											<li>Maximal stationing == total length of
+												reference-shape<br />➞&nbsp;shortening
+												the reference line can cut off linear referenced geometries</li>
+											<li>Changes of leading vertices will influence all stationings (conversion:
+												old stationing +- length change)</li>
+										</ul>
+
+									</td>
+									<td class="nfract"><b>Disadvantages:</b>
+										<ul>
+											<li>difficult to verify in GIS/nature</li>
+											<li>Modifications of the reference geometry will alter the position of
+												<b>all</b> linear referenced points (while maintaining their relative
+												positions)
+											</li>
+										</ul>
+									</td>
+									<td class="mabs"><b>Disadvantages:</b>
+										<ul>
+											<li>difficult to verify in GIS/nature</li>
+											<li>after reference-geometry changes and/or recording, the corresponding M
+												values must be re-entered (vertex editor) or calculated</li>
+											<li>complex effects of reference geometry edits on the linear
+												referenced geometries, because their positions are influenced by both,
+												cartographic <b>visible</b> edits (move/add/delete vertices) and
+												cartographic <b>not</b> visible vertex-M-alterations.
+											</li>
+										</ul>
+									</td>
+								</tr>
+							</table>
+
+						</div>
+					</div>
+
+
+					<div class="p_4" data-toggle_elm_id="lr_conversion_content" data-toggle_icon_id="lr_conversion_icon"
+						id="lr_conversion">
+						<h4>
+							<span id="lr_conversion_icon"></span>Conversion
+						</h4>
+						<div class="p_5" id="lr_conversion_content">
+							A subsequent change of the LR-mode requires the recaclulation of already recorded data.
+							<h6>Recommended procedure:</h6>
+							<ol>
+								<li>(possibly create a backup copy of the data layer)</li>
+								<li>start edit session on data-layer</li>
+								<li>additional numerical field for stationing</li>
+								<li>open field calculator for data-layer</li>
+								<li>perform conversion (expression see below, in case of LoL for both stationing fields)
+								</li>
+								<li>configure new LR-mode in plugin-settings</li>
+								<li>create show-layer for new mode</li>
+								<li>visually compare the results of the two show-layers</li>
+								<li>stop (and eventually save) edit session</li>
+							</ol>
+
+							<h6>Expressions for field calculator</h6>
+							(adapt labels for layers and fields!)
+							<h6>"Nabs"&nbsp;➞&nbsp;"Nfract":</h6>
+							<pre
+								class="code">"_data_layer_stationing_field_n_abs_" / length(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+
+							<h6>"Nabs"&nbsp;➞&nbsp;"Mabs":</h6>
+							<pre
+								class="code">m(&#10;&#09;line_interpolate_point(&#10;&#09;&#09;geometry(&#10;&#09;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;&#09;)&#10;&#09;&#09;),&#10;&#09;&#09;"_data_layer_stationing_field_n_abs_"&#10;&#09;)&#10;)</pre>
+
+
+							<h6>"Nfract"&nbsp;➞&nbsp;"Nabs":</h6>
+							<pre
+								class="code">"_data_layer_stationing_field_n_fract_" * length(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+							<h6>"Nfract"&nbsp;➞&nbsp;"Mabs":</h6>
+							<pre
+								class="code">m(&#10;&#09;line_interpolate_point(&#10;&#09;&#09;geometry(&#10;&#09;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;&#09;)&#10;&#09;&#09;),&#10;&#09;&#09;"_data_layer_stationing_field_n_fract_" * length(&#10;&#09;&#09;&#09;geometry(&#10;&#09;&#09;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;&#09;&#09;)&#10;&#09;&#09;&#09;)&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+							<h6>"Mabs"&nbsp;➞&nbsp;"Nabs" bzw. "Mabs"&nbsp;➞&nbsp;"Nfract"</h6>
+							QGis currently doesn't offer a function for simple conversion from M- to N-stationings (see
+							<a href="https://docs.qgis.org/3.34/en/docs/user_manual/expressions/functions_list.html"
+								target="_blank">docs.qgis.org/.../expressions/functions_list.html</a>), as workaroand
+							define
+							a custom
+							function like <a href="./scripts/get_point_m_2.py" target="_blank"
+								title="Download Python-Code">get_point_m_2.py</a> in field calculator/function editor
+							(copy&paste)...
+							<img class="sized_block_image" src="images/2024-09-17 FieldCalculator 1 en.png"
+								style="width: 900px;" /> and use it aferwards in the expression:
+
+							<h6>"Mabs"&nbsp;➞&nbsp;"Nabs"</h6>
+							<pre
+								class="code">get_point_m_2(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09)&#10;&#09;),&#10;&#09;"_data_layer_stationing_field_m_abs_"&#10;)</pre>
+
+							<h6>"Mabs"&nbsp;➞&nbsp;"Nfract"</h6>
+							<pre
+								class="code">get_point_m_2(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09)&#10;&#09;),&#10;&#09;"_data_layer_stationing_field_m_abs_"&#10;) / length(&#10;&#09;geometry(&#10;&#09;&#09;get_feature(&#10;&#09;&#09;&#09;'_reference_layer_',&#10;&#09;&#09;&#09;'_reference_layer_id_field_',&#10;&#09;&#09;&#09;"_data_layer_reference_field_"&#10;&#09;&#09;)&#10;&#09;)&#10;)</pre>
+
+
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="p_2" data-initially_open="0" data-toggle_elm_id="usage_content" data-toggle_icon_id="usage_icon"
+			id="usage">
+			<h2><span id="usage_icon"></span>Usage</h2>
+
+
+			<div id="usage_content">
+				<div class="p_3" data-toggle_elm_id="settings_content" data-toggle_icon_id="settings_icon"
+					id="settings">
+					<h3><span id="settings_icon"></span>Settings</h3>
+					<div id="settings_content">
+						<div class="p_4">
+							<table class="compare">
+								<tr>
+									<th class="blank"></th>
+									<th>PoL</th>
+									<th>LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>Point-on-Line</td>
+									<td>Line-on-Line</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td><img src="./images/2024-09-03 PoL Toolbar.png" /></td>
+									<td><img src="./images/2024-09-03 LoL Toolbar.png" /></td>
+								</tr>
+								<tr>
+									<td colspan="3" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="necessary_layers">Layers</a> and fields:</b></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="reference_layer">Reference-Layer</a></b></td>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="center">
+										<img src="./images/2024-08-14 PoL Settings 1 en.png" style="width: 600px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<ul>
+											<li>When first called up, a line layer loaded is automatically
+												registered.
+											</li>
+											<li>After selection of the reference layer the plugin can already be
+												used
+												for measurements.</li>
+											<li>A unique ID field (integer/string) is required to link the data
+												layer
+											</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="data_layer">Data-Layer</a></b></td>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th>PoL</th>
+									<th>LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td><img src="./images/2024-08-31 PoL Settings Data Layer en.png"
+											style="width: 600px;" /></td>
+									<td><img src="./images/2024-09-03 LoL Settings Data Layer en.png"
+											style="width: 600px;" /></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ul>
+											<li>ID-field&nbsp;➞&nbsp;unique field for 1:1-link to Show-layer (back
+												reference field)</li>
+											<li>reference-field&nbsp;➞&nbsp;relationship field to reference-Layer
+												(reference-layer-ID-field)</li>
+											<li>stationings-field&nbsp;➞&nbsp;numerical field for stationing</li>
+											<li>LR-mode&nbsp;➞&nbsp;Type of numerical stationing, see <a
+													class="jump_forward" data-jump_elm_id="lr_modes">LR-mode</a>
+											</li>
+											<li id="precision">Precision&nbsp;➞&nbsp;number of decimals (independend
+												from
+												field-definition, "-1"&nbsp;➞&nbsp;maximal precision, also used as
+												display-precision in Feature-Selection and PostProcessing)</li>
+										</ul>
+									</td>
+									<td>
+										<ul>
+											<li>ID-field&nbsp;➞&nbsp;unique field for 1:1-link to Show-layer
+												(Back-Reference-Field)</li>
+											<li>Reference-Field&nbsp;➞&nbsp;relationship field to reference-Layer
+												(reference-layer-ID-field)</li>
+											<li>Offset-Field&nbsp;➞&nbsp;Offset between segment and reference line
+												<sup class="sup_flyout" data-flyout_id="sup_offset"></sup>
+											</li>
+											<li>From-Field&nbsp;➞&nbsp;numerical field for From-stationing</li>
+											<li>To-Field&nbsp;➞&nbsp;numerical field for To-stationing</li>
+											<li>LR-mode&nbsp;➞&nbsp;Type of the numerical stationing, see <a
+													class="jump_forward" data-jump_elm_id="lr_modes">LR-mode</a>
+											</li>
+											<li>Precision&nbsp;➞&nbsp;number of decimals (independend from
+												field-definition, "-1"&nbsp;➞&nbsp;maximal precision, also used as
+												display-precision in Feature-Selection and PostProcessing)</li>
+										</ul>
+									</td>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" class="blank"><b><a class="jump_forward"
+												data-jump_elm_id="show_layer">Show-Layer</a></b></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" style="text-align: center;"><img
+											src="./images/2024-09-03 LoL Settings Show Layer en.png"
+											style="width: 700px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<b>Back-Reference-Field</b>&nbsp;➞&nbsp;1:1-link to data-layer ID-field
+									</td>
+								</tr>
+								<tr>
+									<td colspan="3" class="blank"><b>Style:</b> Customize the style of the temporary
+										auxiliary graphics</td>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th>PoL</th>
+									<th>LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td><img src="./images/2024-09-02 PoL Settings Style en.png"
+											style="width: 600px;" />
+									</td>
+									<td><img src="./images/2024-09-03 LoL Settings Style en.png"
+											style="width: 600px;" />
+									</td>
+								</tr>
+
+								<tr>
+									<td colspan="3" class="blank"><b>Store/Restore Configuration:</b>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" style="text-align: center;">
+										<img src="./images/2024-09-03 PoL Settings Store en.png"
+											style="width: 600px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<ul>
+											<li>Stores current settings (layers, fields, style)</li>
+											<li>Number of configurations in current QGis-Project ist limited to
+												100.
+											</li>
+											<li>Helpful when using several linearly referenced layers inside a
+												project.
+											</li>
+										</ul>
+									</td>
+								</tr>
+							</table>
+
+						</div>
+						<div class="p_5">
+							<h5>Miscellaneous:</h5>
+							<ul>
+								<li><img class="svg_icon" src="images/mActionOpenTable.svg" />opens attrribute-table
+									for
+									reference-, data or show layer</li>
+								<li><img class="svg_icon" src="images/mIconExpression.svg" />opens expression
+									builder
+									for
+									"Display Name", used in QGis for identify and attribute-tables as well as in the
+									plugin <a class="jump_forward"
+										data-jump_elm_id="feature_selection_table">Feature-</a>-
+									and <a class="jump_forward"
+										data-jump_elm_id="post_processing_table">Post-Processing</a>-Selection.</li>
+								<li><img class="svg_icon" src="images/NewDataTable.svg" />Create new preconfigured
+									data-
+									or show layer
+								</li>
+							</ul>
+						</div>
+					</div>
+				</div>
+				<div class="p_3" data-toggle_elm_id="measurement_content" data-toggle_icon_id="measurement_icon"
+					id="measurement">
+					<h3><span id="measurement_icon"></span>Measurement</h3>
+					<div class="p_4" id="measurement_content">
+
+						<div class="p_5">
+							<table class="compare">
+								<tr>
+									<th colspan="3" class="blank">Procedure:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ol>
+											<li>Dialog: open register "Measurement"</li>
+											<li>Dialog: Press button [<img class="svg_icon"
+													src="images/linear_referencing_point.svg" /> New
+												Measurement]</li>
+											<li>Canvas: Move the mouse pointer on the reference line <sup
+													class="sup_flyout" data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;Continuous output of measured values (reference-feature and
+												stationings)
+											</li>
+											<li>Canvas: Click on reference line <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;fix measured values in dialog<br />
+												➞&nbsp;show measurement graphically on map<br />
+												➞&nbsp;measurement finished</li>
+
+											<li>repeat mouse-click on reference-line or press [<img class="svg_icon"
+													src="images/linear_referencing_point.svg" /> New Measurement
+												] to continue</li>
+										</ol>
+									</td>
+									<td>
+										<ol>
+											<li>Dialog: open register "Measurement"</li>
+											<li>Dialog: Press button [<img class="svg_icon"
+													src="images/linear_referencing_point.svg" /> New
+												Measurement]</li>
+											<li>Canvas: Move the mouse pointer on the reference line <sup
+													class="sup_flyout" data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;Continuous output of measured From-values (reference-feature
+												and
+												stationings)
+											</li>
+											<li>Canvas: MouseDown on reference-line <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup>, hold mousebutton<br />
+												➞&nbsp;fix reference-feature in dialog<br />
+												➞&nbsp;fix measured From-Values in dialog<br />
+												➞&nbsp;show From measurement graphically on map
+											</li>
+											<li>Canvas: MouseMove with button pressed on reference-line <sup
+													class="sup_flyout" data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;Continuous output of measured To- and Difference-values<br />
+												➞&nbsp;Show To-measurement and segment graphically on map</li>
+											<li>Canvas: MouseUp on reference-line <sup class="sup_flyout"
+													data-flyout_id="sup_snapping"></sup><br />
+												➞&nbsp;fix all measurements in dialog<br />
+												➞&nbsp;measurement finished</li>
+											<li>repeat mouse-Down/Move/Up on reference line or press [<img
+													class="svg_icon" src="images/re_digitize_lol.svg" /> New
+												Measurement
+												] to continue</li>
+										</ol>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">Results:</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td style="text-align: center;"><img
+											src="./images/2024-08-12 PoL Measure Results en.png"
+											style="width: 700px;" /></td>
+
+									<td style="text-align: center;"><img
+											src="./images/2024-09-04 LoL Measure Results en.png"
+											style="width: 700px;" /></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ol>
+											<li>selected reference-feature <img class="svg_icon"
+													src="images/mActionIdentify.svg" />
+												Open formular <img class="svg_icon" src="images/mIconZoom.svg" />
+												Zoom to feature</li>
+											<li>cursor- and snap-coords X/Y</li>
+											<li>absolute natural distance to start-point of reference line<br />
+												editable via spin-buttons
+												<sup class="sup_flyout" data-flyout_id="sup_ctrl_shift_factors"></sup>
+												or numerical input
+											</li>
+											<li>relative natural distance to start-point of reference line
+												(percentage, editable via spin-buttons or numerical
+												input)</li>
+											<li>absolute M-distance to start-point of reference line<br />
+												editable via spin-buttons
+												<sup class="sup_flyout" data-flyout_id="sup_ctrl_shift_factors"></sup>
+												or numerical input <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>relative M-distance to start-point of reference line (percentage,
+												editable via spin-buttons or numerical input)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>interpolated Z-value <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_z"></sup></li>
+											<li>Follow-up functions:<br />
+												<img class="svg_icon" src="images/mActionTrippleArrowLeft.svg" />
+												move
+												point
+												to start of reference line<br />
+												<img class="svg_icon" src="images/mActionArrowLeft.svg" /> move
+												point in direction of startpoint
+												<sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup><br />
+												<img class="svg_icon" src="images/insert_record.svg" /> Insert new
+												record <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup><br />
+												<img class="svg_icon" src="images/mActionFileSave.svg" /> Update
+												selected recors (feature-ID displayed)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_feature_selected"></sup><br />
+												<img class="svg_icon" src="images/linear_referencing_point.svg" />
+												New
+												measurement:
+												reset dialog and start new measurement<br />
+												<img class="svg_icon" src="images/mActionArrowRight.svg" /> move
+												point in direction of endpoint
+												<sup class="sup_flyout"
+													data-flyout_id="sup_ctrl_shift_factors"></sup><br />
+												<img class="svg_icon" src="images/mActionTrippleArrowRight.svg" />
+												move point to endpoint of reference line<br />
+												<img class="svg_icon" src="images/mIconZoom.svg" /> Zoom to
+												point<br />
+												<img class="svg_icon" src="images/move_lol_from.svg" /> interactive
+												move
+												point on selected reference line<br />
+											</li>
+										</ol>
+									</td>
+
+									<td>
+										<ol>
+											<li>selected reference-feature <img class="svg_icon"
+													src="images/mActionIdentify.svg" />
+												Open formular <img class="svg_icon" src="images/mIconZoom.svg" />
+												Zoom to feature</li>
+											<li>cursor-coordinates From/To X/Y<br />
+												input field for distance segment to reference line <sup
+													class="sup_flyout" data-flyout_id="sup_offset"></sup><br />
+												<img class="svg_icon" src="images/linear_referencing_point.svg" /> ➞
+												move from-point<br />
+												<img class="svg_icon" src="images/linear_referencing_to_point.svg" /> ➞
+												move to-point<br />
+												Snap-coordinates From/To X/Y
+											</li>
+											<li>absolute natural distance From/To to start-point of reference line
+												and difference<br />
+												editable via spin-buttons
+												<sup class="sup_flyout" data-flyout_id="sup_ctrl_shift_factors"></sup>
+												or numerical input
+											</li>
+											<li>relative natural distance From/To to start-point of reference line
+												and difference (percentage, editable via spin-buttons or numerical
+												input)
+											</li>
+											<li>absolute M-distance From/To to start-point of reference line and
+												difference<br />
+												editable via spin-buttons
+												<sup class="sup_flyout" data-flyout_id="sup_ctrl_shift_factors"></sup>
+												or numerical input <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>relative M-distance From/To to start-point of reference line and
+												difference (percentage, editable via spin-buttons or mittels
+												numerical input) <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_m"></sup>
+											</li>
+											<li>interpolated Z-value From/To and difference <sup class="sup_flyout"
+													data-flyout_id="sup_requires_linestring_z"></sup></li>
+											<li>Follow-up functions:<br />
+												<img class="svg_icon" src="images/mActionTrippleArrowLeft.svg" />
+												move segment
+												to start of reference line setzen<br />
+												<img class="svg_icon" src="images/mActionDoubleArrowLeft.svg" />
+												flip segment
+												in direction of start (old From&nbsp;➞&nbsp;new To)<br />
+												<img class="svg_icon" src="images/mActionArrowLeft.svg" /> move
+												segment in direction start
+												<sup class="sup_flyout" data-flyout_id="sup_ctrl_shift_factors"></sup>
+												<br />
+												<img class="svg_icon" src="images/insert_record.svg" /> Insert new
+												record <sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup><br />
+												<img class="svg_icon" src="images/mActionFileSave.svg" /> Update
+												selected record (feature-ID displayed)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup> <sup
+													class="sup_flyout"
+													data-flyout_id="sup_requires_data_feature_selected"></sup><br />
+												<img class="svg_icon" src="images/linear_referencing_point.svg" />
+												New Measurement: reset dialog, start new measurement<br />
+												<img class="svg_icon" src="images/mActionArrowRight.svg" /> move
+												segment in direction of end
+												<sup class="sup_flyout" data-flyout_id="sup_ctrl_shift_factors"></sup>
+												<br />
+												<img class="svg_icon" src="images/mActionDoubleArrowRight.svg" />
+												flip segment
+												in direction of end (old To&nbsp;➞&nbsp;new From)<br />
+												<img class="svg_icon" src="images/mActionTrippleArrowRight.svg" />
+												move segment
+												to the end of reference line<br />
+												<img class="svg_icon" src="images/move_segment.svg" /> interactive
+												move segment on selected reference line<br />
+												<img class="svg_icon" src="images/change_offset.svg" /> interactive
+												set distance segment
+												to reference line <sup class="sup_flyout"
+													data-flyout_id="sup_offset"></sup><br />
+												<img class="svg_icon" src="images/mIconZoom.svg" /> Zoom to
+												segment<br />
+											</li>
+										</ol>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<div class="notes">
+											Instead of interactive measurement, you can select reference line in
+											dialog and enter numerical stationings manually </div>
+									</td>
+								</tr>
+							</table>
+						</div>
+					</div>
+				</div>
+
+				<div class="p_3" data-toggle_elm_id="feature_selection_content"
+					data-toggle_icon_id="feature_selection_icon" id="feature_selection">
+					<h3>
+						<span id="feature_selection_icon"></span>Feature-Selection
+					</h3>
+
+
+					<div id="feature_selection_content">
+						In this table you can collect, visualize and edit a user-defined collection of linear
+						referenced features.
+						<div class="p_4">
+							<table class="compare" id="feature_selection_table">
+								<tr>
+									<th colspan="3" class="blank">Procedure:</th>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										Dialog: open the tab "Feature-Selection":<br />
+										<img src="./images/2024-09-03 LoL Feature Selection Select Buttons en.png"
+											style="width: 600px; margin: 10px; margin-left: 50px;" /><br />
+										<ul>
+											<li>[<img class="svg_icon"
+													src="images/mActionEditIndentMore.svg" />Data-Layer]&nbsp;➞&nbsp;
+												fetch records from data-layer
+												<sup class="sup_flyout"
+													data-flyout_id="sup_replace_expand_selection_ctrl_shift"></sup>
+											</li>
+											<li>[<img class="svg_icon" src="images/mActionEditIndentMore.svg" />
+												Show-Layer]&nbsp;➞&nbsp;fetch records from show-layer
+												<sup class="sup_flyout"
+													data-flyout_id="sup_replace_expand_selection_ctrl_shift"></sup>
+												<sup class="sup_flyout" data-flyout_id="sup_requires_show_layer"></sup>
+											</li>
+
+											<li><img class="svg_icon" src="images/mActionOpenTable.svg" />&nbsp;➞&nbsp;
+												open data/show layer attribute table <sup class="sup_flyout"
+													data-flyout_id="sup_requires_show_layer"></sup>, select from
+												table see <a class="jump_forward"
+													data-jump_elm_id="feature_selection_from_table">Feature-selection
+													from attribute forms and tables</a>
+											</li>
+											<li><img class="svg_icon"
+													src="images/select_point_features.svg" />&nbsp;➞&nbsp;
+												interactive selection from map
+												<sup class="sup_flyout"
+													data-flyout_id="sup_map_select_unselect_ctrl_shift"></sup>
+												<sup class="sup_flyout" data-flyout_id="sup_requires_show_layer">*</sup>
+											</li>
+										</ul>
+
+
+									</td>
+
+								<tr>
+									<th colspan="3" class="blank">Result:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr id="feature_selection_table">
+									<td class="blank"></td>
+									<td style="text-align: center;"><img style="width: 600px;"
+											src="images/2024-08-13 PoL Feature Selection Filled en.png" />
+									</td>
+									<td style="text-align: center;">
+										<img style="width: 700px;"
+											src="images/2024-09-03 LoL Feature Selection en.png" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ul>
+
+											<li><img class="svg_icon" src="images/backspace.svg" /> remove from
+												feature-selection</li>
+											<li><img class="svg_icon" src="images/mActionIdentify.svg" /> open
+												attribute form </li>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" /> show
+												feature on map
+												<sup class="sup_flyout" data-flyout_id="sup_pan_zoom_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionInvertSelection.svg" />
+												select record in layer
+												<sup class="sup_flyout"
+													data-flyout_id="sup_select_unselect_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionDeleteSelectedFeatures.svg" />
+												delete record
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_pol_feature.svg" /> move
+												feature on reference line (stationing)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/reposition_pol_feature.svg" />
+												reposition feature (reference + stationing)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+										</ul>
+									</td>
+
+									<td>
+										<ul>
+
+											<li><img class="svg_icon" src="images/backspace.svg" /> remove from
+												feature-selection</li>
+											<li><img class="svg_icon" src="images/mActionIdentify.svg" />open
+												attribute form
+											</li>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" /> show
+												feature on map
+												<sup class="sup_flyout" data-flyout_id="sup_pan_zoom_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionInvertSelection.svg" />
+												select record in layer
+												<sup class="sup_flyout"
+													data-flyout_id="sup_select_unselect_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionDeleteSelectedFeatures.svg" />
+												delete record
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_segment.svg" /> move feature
+												on
+												reference line (stationing)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/re_digitize_lol.svg" /> reposition
+												feature (reference + stationing)
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_pol_feature.svg" /> move
+												from-point on reference line
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_lol_to.svg" /> move to-point
+												on reference line
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/change_offset.svg" /> change
+												distance
+												segment...reference line
+												<sup class="sup_flyout" data-flyout_id="sup_offset"></sup>
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<div class="p_xxx">
+											click on table-row&nbsp;➞&nbsp;select feature, highlight on map, show
+											meta-data in Measurement-Tab
+											<sup class="sup_flyout"
+												data-flyout_id="sup_select_unselect_zoom_ctrl_shift_dbl"></sup>
+										</div>
+
+										<div class="p_xxx">for the textual contents of reference-, data- and
+											show-layer the layer-property "Display Name" is used, accessible via
+											standard-dialog or [<img class="svg_icon"
+												src="images/mIconExpression.svg" />] in the
+											Plugin-Settings-Tab
+										</div>
+										<div class="p_xxx">
+											for display-precision of stationings see <a class="jump_forward"
+												data-jump_elm_id="precision">precision</a> in
+											Data-Layer-Settings</div>
+										<div class="p_xxx">
+											Faulty features are marked with red text color, the error-reason is
+											indicated in the FlyOut</div>
+										<div class="notes">
+											Note:<br />
+											The plugin treads records with stationings out of value-range as
+											"faulty", because they can lead to faulty calculations (f.e.
+											segment-length from difference Nabs-from-to-stationings).<br />
+											In show-layer these records are nevertheless displayed and
+											positioned to start/end of the assigned reference line.
+
+										</div>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">Follow-up functions:</th>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<ul>
+											<li>[<img class="svg_icon" src="images/mActionPanToSelected.svg" /> Zoom
+												to selection]</li>
+											<li>[<img class="svg_icon" src="images/mActionDeselectActiveLayer.svg" />
+												Clear selection]
+											</li>
+											<li>[<img class="svg_icon" src="images/mActionInvertSelection.svg" />
+												Select in layer]&nbsp;➞&nbsp;selects these features in data- and
+												show-layer
+												<sup class="sup_flyout"
+													data-flyout_id="sup_select_unselect_ctrl_shift"></sup>
+
+											</li>
+											<li>[<img class="svg_icon" src="images/mActionFilter2.svg" /> Selection
+												as filter]&nbsp;➞&nbsp;use selection to filter data- and show-layer
+												<sup class="sup_flyout" data-flyout_id="sup_remove_filter_ctrl"></sup>
+											</li>
+										</ul>
+									</td>
+								</tr>
+
+							</table>
+						</div>
+
+						<div class="p_4" id="feature_selection_from_table">
+							<h4>Feature-selection from attribute forms and tables:</h4>
+							The plugin implements "Layer-Actions" on the registered data- and show-Layer to select
+							features out of attribute forms and tables:
+							<img class="sized_block_image" src="images/2024-09-03 PoL Layer Action Table en.png"
+								style="width: 800px;" />
+							<img class="sized_block_image" src="images/2024-09-03 PoL Layer Action Table 2 en.png"
+								style="width: 400px;" />
+						</div>
+					</div>
+				</div>
+
+				<div class="p_3" data-toggle_elm_id="post_processing_content" data-toggle_icon_id="post_processing_icon"
+					id="post_processing">
+					<h3>
+						<span id="post_processing_icon"></span>Post-Processing
+					</h3>
+					<div id="post_processing_content">
+						Edits of reference-geometries can affect linear referenced geometries, the decisive factor
+						is:
+						<ul>
+							<li>the kind of reference-geometry-change (move geometry, move/add/delete vertex)</li>
+							<li>the <a class="jump_forward" data-jump_elm_id="lr_modes">LR-mode</a></li>
+							<li>the position of the reference-geometry-edit relative to the linear referenced
+								positions</li>
+						</ul>
+
+						<div class="p_4">
+							<h4>Example:</h4>
+
+							After renaturation, the original course of the river was edited in QGis
+							which unintentionally changed the position in some other layers...<br />
+
+							<h5>Initial situation:</h5>
+							<ul>
+								<li>reference-layer with water courses</li>
+								<li>PoL-Layer: Structures on water courses (bridges, culverts ...)</li>
+								<li>LoL-Layer: Sections of use next to the watercourses</li>
+								<li>LR-mode "Nabs" (natural stationing)</li>
+								<li>reference-layer and linear referenced layers loaded to the same QGis-project
+								</li>
+								<li>plugin-dialogs once opened <b>before</b> edit-session of the reference layer
+									started (initialization)
+								</li>
+							</ul>
+
+
+							<table class="compare">
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">before:</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td style="text-align: center;">
+										<img src="images/2024-08-27 PoL PostProcessing Sample 1.png"
+											style="width:800px;" />
+									</td>
+									<td style="text-align: center;">
+										<img src="images/2024-09-04 LoL PostProcessing Sample 1.png"
+											style="width:400px;" />
+									</td>
+
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">after:</th>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td style="text-align: center;">
+										<img src="images/2024-08-27 PoL PostProcessing Sample 2.png"
+											style="width:800px;" />
+									</td>
+									<td style="text-align: center;">
+										<img src="images/2024-09-04 LoL PostProcessing Sample 2.png"
+											style="width:400px;" />
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										the following points (in digitize-direction) have moved by the dimension of
+										the extension in direction of mouth (previous points not affected with
+										LR-mode "Nabs")
+									</td>
+									<td>
+										the following segments (in digitize-direction) have moved by the dimension
+										of the extension in direction of mouth
+										rsp. adapted to the new course (previous segments not affected with LR-mode
+										"Nabs").
+									</td>
+								</tr>
+
+								<tr>
+									<th colspan="3" class="blank" id="post_processing_table">
+										Post-Processing-Dialog:</th>
+								</tr>
+								<tr>
+									<th class="blank"></th>
+									<th class="center">PoL</th>
+									<th class="center">LoL</th>
+								</tr>
+								<tr id="post_processing_table">
+									<td class="blank"></td>
+									<td style="text-align: center;"><img
+											src="images/2024-08-27 PoL PostProcessing Sample 3 en.png"
+											style="width:600px;" /></td>
+									<td style="text-align: center;"><img
+											src="images/2024-08-27 LoL PostProcessing Sample 3 en.png"
+											style="width:600px;" /></td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td>
+										<ul>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" /> highlight feature on
+												map
+												<sup class="sup_flyout" data-flyout_id="sup_pan_zoom_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionIdentify.svg" /> open
+												attribute form
+											</li>
+											<li><img class="svg_icon" src="images/previous_line.svg" /> show edits
+												in referencelayer
+												<sup class="sup_flyout" data-flyout_id="sup_zoom_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/backspace.svg" /> remove row from
+												table (ends post-processing for this feature)
+											</li>
+											<li><img class="svg_icon" src="images/move_pol_feature.svg" /> move
+												geometry interactive
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionDeleteSelectedFeatures.svg" />
+												delete record
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+										</ul>
+									</td>
+									<td>
+										<ul>
+											<li><img class="svg_icon" src="images/mIconZoom.svg" /> highlight feature on
+												map
+												<sup class="sup_flyout" data-flyout_id="sup_pan_zoom_ctrl_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionIdentify.svg" /> open
+												attribute form
+											</li>
+											<li><img class="svg_icon" src="images/previous_line.svg" /> show edits
+												in referencelayer <sup class="sup_flyout"
+													data-flyout_id="sup_zoom_shift"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/backspace.svg" /> remove row from
+												table (ends post-processing for this feature)
+											</li>
+											<li><img class="svg_icon" src="images/move_segment.svg" /> move geometry
+												interactive
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/mActionDeleteSelectedFeatures.svg" />
+												delete record
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_lol_from.svg" />
+												move from-point
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+											<li><img class="svg_icon" src="images/move_lol_to.svg" />
+												move to-point
+												<sup class="sup_flyout"
+													data-flyout_id="sup_requires_data_layer_editable"></sup>
+											</li>
+										</ul>
+									</td>
+								</tr>
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2">
+										<div class="p_xxx">
+											click on table-row&nbsp;➞&nbsp;select feature and highlight on map
+											<sup class="sup_flyout"
+												data-flyout_id="sup_select_unselect_zoom_ctrl_shift_dbl"></sup>
+										</div>
+
+										<div class="p_xxx">for the textual contents of reference- and data-layer the
+											layer-property "Display Name" is used, accessible via
+											standard-dialog or [<img class="svg_icon"
+												src="images/mIconExpression.svg" />]
+											in the Plugin-Settings-Tab
+										</div>
+										<div class="p_xxx">
+											for display-precision of stationings see <a class="jump_forward"
+												data-jump_elm_id="precision">precision</a> in
+											Data-Layer-Settings
+										</div>
+									</td>
+								</tr>
+								<tr>
+									<th colspan="3" class="blank">Follow-up functions:</th>
+								</tr>
+
+								<tr>
+									<td class="blank"></td>
+									<td colspan="2" style="margin-left:20%; margin-right:20%;">
+										<ul>
+											<li>[<img class="svg_icon" src="images/mActionPanToSelected.svg" /> Zoom
+												to selection]</li>
+											<li>[<img class="svg_icon" src="images/mActionDeselectActiveLayer.svg" />
+												Clear selection] (ends post-processing)</li>
+
+										</ul>
+									</td>
+								</tr>
+
+
+							</table>
+
+
+							<div class="notes">
+								The number of Post-Processing-Features is limited to 100
+								reference lines with total 500 linear referenced features.
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="p_4" data-initially_open="0" data-toggle_elm_id="note_development_content"
+			data-toggle_icon_id="note_development_icon" id="note_development">
+			<h4><span id="note_development_icon"></span>Development and Support</h4>
+			<div class="p_4" id="note_development_content">
+				<table class="invisible">
+					<tr>
+						<td>Author:</td>
+						<td>Ludwig Kniprath</td>
+					</tr>
+					<tr>
+						<td>Mailto:</td>
+						<td>ludwig[at]kni-online.de</td>
+					</tr>
+					<tr>
+						<td>Version:</td>
+						<td>2.0.0 (2024-09)</td>
+					</tr>
+					<tr>
+						<td colspan="2">The plugin was developed with the available QGis-Versions, currently QGIS
+							3.38.4 'Grenoble' and QGIS 3.34.10 'Prizren' (LTR).</td>
+					</tr>
+					<tr>
+						<td colspan="2">Source-code and tracker <a
+								href="https://github.com/Ludwig-K/QGisLinearReference/"
+								target="_blank">https://github.com/Ludwig-K/QGisLinearReference/</a>
+						</td>
+					</tr>
+					<tr>
+						<td colspan="2">The project is licensed under the GNU GPL 2 license.</td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+
+	</div>
+
+	<div id="back_to_jump">
+		<a id="back_to_jump_first" title="Anfang...">&lt;&lt;</a>&nbsp;&nbsp;&nbsp;
+		<a id="back_to_jump_back" title="Zurück...">&lt;</a>&nbsp;&nbsp;&nbsp;&nbsp;
+		<a id="back_to_jump_for" title="Vor...">&gt;</a>&nbsp;&nbsp;&nbsp;
+		<a id="back_to_jump_last" title="Ende...">&gt;&gt;</a>
+	</div>
+
+
+
+</body>
+
+</html>
