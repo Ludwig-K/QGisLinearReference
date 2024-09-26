@@ -1,27 +1,42 @@
 [general]
 name=LinearReferencing
+version=2.0.0
+category=Plugins
+icon=icons/linear_referencing.svg
+experimental=False
+deprecated=False
+qgisMinimumVersion=3.0
+qgisMaximumVersion=3.99
+tags=python, linear reference, linear referencing, event theme, lrs, dynamic segmentation, vector
 description=Tools for linear referenced data
 about=Tools for linear referenced data:
   - measure routes and points on linestring layers
   - create tables for point- or route features or use existing ones
   - insert or update features numerical and/or graphical
-  - create virtual layers or use existing ones to represent features on map
-  - accepts any source-type for reference- and data-layer
-  - easy to use
-version=1.0.2
-qgisMinimumVersion=3.0
-qgisMaximumVersion=3.99
+  - create virtual layers to represent features on map
+
 author=Ludwig Kniprath
-email=ludwig@kni-online.de
+email=ludwig[at]kni-online.de
+homepage=https://github.com/Ludwig-K/QGisLinearReference/
 tracker=https://github.com/Ludwig-K/QGisLinearReference/issues
 repository=https://github.com/Ludwig-K/QGisLinearReference
-tags=python, linear reference, linear referencing, event theme, lrs, dynamic segmentation, vector
-homepage=https://github.com/Ludwig-K/QGisLinearReference/
-category=Plugins
-icon=icons/linear_referencing.svg
-experimental=False
-deprecated=False
-changelog=1.0.2 (2023-07-19)
+
+changelog=
+  <p>2.0.0 (2024-09-01)
+  - Compatibility with latest QGis-Versions 3.38.4 'Grenoble' rsp. QGIS 3.34.10 'Prizren' (LTR)
+  - Relative stationing (value-range 0...1)
+  - M-Stationing (for Linestring-M-Reference-Layer)
+  - "Multi"-Reference-Layer-Support (partially)
+  - enhanced GUI
+  - updated documentation (english and german)
+  - Fix bugs
+  <p>1.1.0 (2023-11-10)
+  - "PostProcessing": re-positioning of linear-referenced features after reference-geometry-edits
+  - "Invalid Features": detect and correct invalid features
+  - additional functionalities
+  - enhanced GUI
+  - Fix bugs
+  <p>1.0.2 (2023-07-19)
   - Bugfix (Issue #2)
   - Compatibility with LTR 3.28.8 'Firence' (Issue #1)
   <p>1.0.1 (2023-07-10)

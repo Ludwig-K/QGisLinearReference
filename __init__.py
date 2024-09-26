@@ -21,16 +21,17 @@ the Free Software Foundation; either version 2 of the License, or
 
 ********************************************************************
 """
-# Rev. 2023-04-21
+
 
 from qgis._gui import QgisInterface
 from LinearReferencing.tools.MyDebugFunctions import debug_print
+
 
 def classFactory(iface:QgisInterface):
     """reimplemented function for initialization of the plugin
     :param iface:
     """
-    # Rev. 2023-04-21
+    
     from .LinearReference import LinearReference
     return LinearReference(iface)
 

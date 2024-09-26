@@ -9,7 +9,7 @@ Original purpose:
 
 ## Uses three types of layers for PoL/LoL: ##
 
-### "data-layer" ###
+### "Data-Layer" ###
 - geometry-less "layers" in the current project
 - can be created with support of this plugin (GeoPackage)
 - or used, if they allready exist as layer in the current project
@@ -22,52 +22,19 @@ Original purpose:
   - measure-fields (one for PoL, two for LoL, numeric type)
   - for LoL: offset-field (numeric) for the parallel offset of the segments from the referenced line (positive: left side, negative: right side).
   
-### "reference-layer" ###
+### "Reference-Layer" ###
 - vector-layer (GeoPackage, PostGIS, Shape...)
 - type linestring/linestringM/linestringZ/linestringMZ... (M-values not taken into account)
   - hint: Shape-files don't differentiate single- and multipart-geometries, therefore also the linestring-xx-multi-versions are possible, but not tested and results not predictable 
 - unique-ID-field (type integer or string, usually the primary-key) for join the data-layer
 
-### "show-layer" ###
-- virtual layer or imported database-view
+### "Show-Layer" ###
+- virtual layer
 - calculate the point/segment-geometries 
-  - database f.e. PostGIS-view:
-    - recommended in case of requirements respecting
-      - performance (QGis-virtual-layer tend to be slow) 
-      - security (constraints/foreign keys/transactions/user-privileges/backups...)
-      - possibilities (multi-user, Network-Access)
-      - and... and...
-    - hint: the database should contain both layers to join them in a view and get the security benefits mentioned above, else joins to remote databases must be implemented
-  - virtual:
-    - QGis-internal solution that combines data- and reference-layer and calculates the PoL/LoL-Features with expressions "ST_Line_Interpolate_Point(...)" or "ST_Line_Substring(...)" 
-    - data/reference-layer can come from totally different sources (f.e. join Excel-Table with Shape-File)
-    - if created by plugin: initially contain only the minimal necessary fields (ID, reference-ID, measures, offset), all other fields from data- and reference-layer are joined
+- combines data- and reference-layer and calculates the PoL/LoL-Features with expressions "ST_Line_Interpolate_Point(...)" or "ST_Line_Substring(...)" 
+- data/reference-layer can come from totally different sources (f.e. join Excel-Table with Shape-File)
+- plugin-created with the minimal necessary fields (ID, reference-ID, measures, offset), all other fields from data- and reference-layer are joined
 
-Samples:
-
-PoL:
-``` SQL
-SELECT data_lyr.fid as "fid",
- data_lyr.line_ref_id as "line_ref_id",
- data_lyr.measure as "measure",
- ST_Line_Interpolate_Point(ref_lyr.geometry, data_lyr."measure"/st_length(ref_lyr.geometry)) as point_geom
-FROM  "data_lyr_xyz" as data_lyr
-  INNER JOIN "ref_lyr_xyz" as ref_lyr ON data_lyr."line_ref_id" = ref_lyr."gew_id"
-```
-
-LoL:
-``` SQL
-SELECT data_lyr.upabs_id as "upabs_id",
- data_lyr.line_ref_id as "line_ref_id",
- data_lyr.measure_from as "measure_from",
- data_lyr.measure_to as "measure_to",
- data_lyr.offset as "offset",
- CASE WHEN data_lyr."offset" is null or data_lyr."offset" = 0 THEN ST_Line_Substring(ref_lyr.geometry, min(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry),max(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry)) ELSE ST_OffsetCurve(ST_Line_Substring(ref_lyr.geometry, min(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry),max(data_lyr."measure_from",data_lyr."measure_to")/st_length(ref_lyr.geometry)),data_lyr."offset") END as line_geom /*:linestring:25832*/
-FROM  "data_lyr_xyz" as data_lyr
-  INNER JOIN "ref_lyr_xyz" as ref_lyr ON data_lyr."line_ref_id" = ref_lyr."gew_id"
-```
-hint: the expression for LoL-features looks a bit tricky, but the "CASE WHEN"-part was necessary because of a "bug" (?) in QGis (under windows only...), 
-which refused to calculate geometries for offset value 0.
 ## The plugin can be used in different ways: ##
 ### Measure ###
 - Just show measures for the current cursor-Position on the appropriate feature of the "reference-layer" 
@@ -81,12 +48,13 @@ which refused to calculate geometries for offset value 0.
 - access plugin-functionality from dialog and/or feature-tables and -forms (the plugin places two "actions" to feature-tables and attribute-forms of data-and show-layer for Zoom/Pan/Edit)
 
 ## Addendum ##
-- the Plugin was developed in 2023 with the newest available QGis-version:
-  - 3.32 "Lima"
-  - Windows (11)
-  - Linux (Mint 21.1 "Vera")
-- not tested with older/LTR-versions
-- not tested on QGis for macOS
+- The plugin has been developed under the latest versions since 2023, currently
+  - QGIS 3.38.4 'Grenoble'
+  - QGIS 3.34.10 'Prizren' (LTR)
+  - Windows (10 + 11)
+  - Linux (Ubuntu/Mint 21.2)
+- not tested (but should run) with older QGis-3-Versions
+- not tested on macOS
 - please report bugs or ideas for missing features 
 - or translation-errors :-)
 - or support the plugin-usability for the community with pylupdate5/lsrelease-translations to other languages then english/german
@@ -102,7 +70,7 @@ which refused to calculate geometries for offset value 0.
 
 ## Support ##
 If you are having issues, please let me know.
-You can directly contact me via ludwig@kni-online.de
+You can directly contact me via ludwig[at]kni-online.de
 
 ## License ##
 The project is licensed under the GNU GPL 2 license.
