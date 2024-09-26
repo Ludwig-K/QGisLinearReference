@@ -4,11 +4,11 @@
 ********************************************************************
 
 * Part of the QGis-Plugin LinearReferencing:
-* MapTool for digitizing Point-Events in MapCanvas
+* MapTool for digitizing Point-on-Line-Events in MapCanvas
 
 ********************************************************************
 
-* Date                 : 2023-03-01
+* Date                 : 2024-06-15
 * Copyright            : (C) 2023 by Ludwig Kniprath
 * Email                : ludwig at kni minus online dot de
 
@@ -21,649 +21,1749 @@ the Free Software Foundation; either version 2 of the License, or
 
 ********************************************************************
 """
+
 from __future__ import annotations
-import os, qgis, osgeo, datetime, sys
+import datetime
+import math
+import os
+import osgeo
+import qgis
+import sys
+import numbers
+import typing
+import urllib
+import collections
+import copy
+from enum import Flag, auto
+import re
+import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
+
 from LinearReferencing import tools, dialogs
-from LinearReferencing.icons import resources
+from LinearReferencing.tools.MyTools import PoLFeature, PoLFeature
+from LinearReferencing.qt import MyQtWidgets
+from LinearReferencing.tools.MyDebugFunctions import debug_log, debug_print, get_debug_pos, get_debug_file_line
+from LinearReferencing.i18n.SQLiteDict import SQLiteDict
 
-from LinearReferencing.tools.MyDebugFunctions import debug_print
-from LinearReferencing.tools.MyDebugFunctions import get_debug_pos as gdp
-
-from LinearReferencing.tools.MyToolFunctions import qt_format
+# global variable
+MY_DICT = SQLiteDict()
 
 
+class SessionData:
+    """Template for self.session_data: Session-Data"""
+    # Rev. 2024-07-25
+
+    # currently selected toolmode, will affect the canvasMove/Press/Release-Events
+    # list of available tool_modes see self::tool_modes
+    tool_mode = None
+
+    # the previous selected toolmode, switch-back-by-canvas-click-convenience for tool_mode 'pausing'
+    previous_tool_mode = None
+
+    # int: fid of the current selected/snapped reference-line
+    current_ref_fid = None
+
+    # int: fid which reference-line is currently highlighted, for toggle-functionality, independend from current_ref_fid
+    highlighted_ref_fid = None
+
+    # measure-result for mouse-press/release events on canvas, type POL, special for move-actions, sometimes used as flag
+    pol_mouse_down = None
+    pol_mouse_move = None
+    pol_mouse_up = None
+
+    # runtime-feature from measure-result
+    # no data-fid
+    # used for inserts
+    # type PoLFeature
+    measure_feature = None
+
+    # selected feature from feature-selection, mostly for edit-purpose, type PoLFeature
+    edit_feature = None
+
+    # current selected post-processing-Feature, type PoLFeature
+    # po_pro_cached_feature available via self.session_data.po_pro_data_cache[po_pro_feature.data_fid]
+    # po_pro_cached_geom available via self.session_data.po_pro_reference_cache[po_pro_feature.ref_fid]
+    po_pro_feature = None
+
+    # list of selected Data-Layer-fids (integers) for "Feature-Selection"
+    selected_fids = []
+
+    # dictionary for cached data-features, key = fid of data-layer, value collections.namedtuple with properties StationingN and StationingM
+    po_pro_data_cache = {}
+
+    # dictionary of cached geometries, key = fid of reference-layer, value original version of geometry
+    po_pro_reference_cache = {}
+
+    def __str__(self):
+        """stringify implemented for debug-purpose"""
+        # Rev. 2024-07-25
+        result_str = ''
+        property_list = [prop for prop in dir(self) if not prop.startswith('__') and not callable(getattr(self, prop))]
+
+        longest_prop = max(property_list, key=len)
+        max_len = len(longest_prop)
+
+        for prop in property_list:
+            result_str += f"{prop:<{max_len}}    {getattr(self, prop)}\n"
+
+        return result_str
+
+
+class FVS(Flag):
+    """
+    FeatureValidState for stored pol-Features
+    Constraint-like check of linear-referenced-stationings: binary flag
+    positive-flag: Each bit symbolizes a special kind of requirement
+    Note: checks of instances are done in range of the auto()-value
+    """
+    # Rev. 2024-07-25
+    INIT = auto()
+
+    DATA_FEATURE_EXISTS = auto()
+    REFERENCE_ID_VALID = auto()
+
+    REFERENCE_FEATURE_EXISTS = auto()
+    REFERENCE_GEOMETRY_EXIST = auto()
+
+    # complex group-parameter, depends on lrMode und single/multi/mergeable geometries
+    REFERENCE_GEOMETRY_VALID = auto()
+
+    # Note: Features outside range are drawn nevertheless in the virtual layers at start-point rsp. end-point of the referenced features
+    STATIONING_NUMERIC = auto()
+    STATIONING_INSIDE_RANGE = auto()
+
+    # Check-results, done in range of the auto()-value (binary: bitwise from right to left), stopping on first error
+    is_valid = True
+    first_fail_flag = None
+
+    def check_data_feature_valid(self):
+        """wrapper to check validity of the current data-feature
+        sets is_valid rsp. first_fail_flag
+        """
+        # Rev. 2024-07-25
+
+        check_params = (
+                self.__class__.INIT |
+                self.__class__.DATA_FEATURE_EXISTS |
+                self.__class__.REFERENCE_GEOMETRY_VALID |
+                self.__class__.STATIONING_NUMERIC |
+                self.__class__.STATIONING_INSIDE_RANGE
+        )
+
+        self.check(check_params)
+
+    def check(self, required_flags):
+        """compares self with a required state
+        sets is_valid rsp. first_fail_flag
+        :param required_flags: | combination of the required flag-values
+        """
+        # Rev. 2024-07-25
+
+        # global check for all required flags, stop on first failure
+        self.is_valid = required_flags in self
+        if not self.is_valid:
+            for item in self.__class__:
+                # iterate over all possible single-flags up to first failure flag
+                # single-flags see http://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2)
+                if item.value and (item.value & (item.value - 1)) == 0:
+                    if (item & required_flags) and not (item & self):
+                        self.first_fail_flag = item.name
+                        break
+
+    def __str__(self):
+        """stringify implemented for debug-purpose"""
+        # Rev. 2024-07-25
+        result_str = ''
+        property_list = [prop for prop in dir(self) if not prop.startswith('__') and not callable(getattr(self, prop))]
+        item_list = [item.name for item in self.__class__ if item.value and (item.value & (item.value - 1)) == 0]
+
+        longest_prop = max(property_list, key=len)
+        longest_item = max(item_list, key=len)
+
+        max_len = max(len(longest_prop), len(longest_item))
+
+        for prop in property_list:
+            result_str += f"{prop:<{max_len}}    {getattr(self, prop)}\n"
+
+        for item in self.__class__:
+            # iterate over all possible single-flags up to first failure flag
+            # single-flags see http://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2)
+            if item.value and (item.value & (item.value - 1)) == 0:
+                if (item & self):
+                    result_str += f"{item.name:<{max_len}} => 1 \n"
+                else:
+                    result_str += f"{item.name:<{max_len}} => 0 \n"
+
+        return result_str
+
+
+class DerivedSettings:
+    """template for self.derived_settings,
+    parsed from self.stored_settings (key-strings like Layer-IDs, Field-Names)
+    to QGis/Qt-Objects (QgsVectorLayer, QgsField)"""
+    # Rev. 2024-07-25
+    refLyr = None
+    refLyrIdField = None
+    dataLyr = None
+    dataLyrIdField = None
+    dataLyrReferenceField = None
+    dataLyrStationingField = None
+    showLyr = None
+    showLyrBackReferenceField = None
+
+
+class StoredSettings:
+    """template for self.stored_settings -> stored settings
+    alphanumeric values like layer-IDs, colors, sizes, stored in QGis-Project
+    all properties starting with single '_' are stored to project-settings rsp. to project file
+    partially defined with property-getter-and-setter to register any user-setting-changes,
+    which then set the QGis-Project "dirty" and have these changes stored on sys_store_settings with save
+    so every write-access to these properties, that should not set the "dirty"-Flag, must be done to the _internal-properties
+    see store/sys_restore_settings()
+    """
+    # Rev. 2024-07-25
+
+    # linear-reference-mode
+    # how are stationings calculated?
+    # variants:
+    # Nabs N natural with absolute stationings => data-layer with 2 numerical columns from/to 0...reference-line length
+    # Mabs M measured with Vertex-M-values => data-layer with 2 numerical columns from/to
+    # Nfract natural with relative stationings => data-layer with 2 numerical columns from/to 0...1 fraction of the reference-line length
+    # perhaps extended in later releases?
+    _lrMode = 'Nabs'
+
+    @property
+    def lrMode(self):
+        return self._lrMode
+
+    @lrMode.setter
+    def lrMode(self, value):
+        self._lrMode = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # ID of the used reference-layer
+    _refLyrId = None
+
+    @property
+    def refLyrId(self):
+        return self._refLyrId
+
+    @refLyrId.setter
+    def refLyrId(self, value):
+        self._refLyrId = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Name of the ID-Field in reference-layer
+    _refLyrIdFieldName = None
+
+    @property
+    def refLyrIdFieldName(self):
+        return self._refLyrIdFieldName
+
+    @refLyrIdFieldName.setter
+    def refLyrIdFieldName(self, value):
+        self._refLyrIdFieldName = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # ID of data-layer
+    _dataLyrId = None
+
+    @property
+    def dataLyrId(self):
+        return self._dataLyrId
+
+    @dataLyrId.setter
+    def dataLyrId(self, value):
+        self._dataLyrId = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Name of ID-Field in data-layer
+    _dataLyrIdFieldName = None
+
+    @property
+    def dataLyrIdFieldName(self):
+        return self._dataLyrIdFieldName
+
+    @dataLyrIdFieldName.setter
+    def dataLyrIdFieldName(self, value):
+        self._dataLyrIdFieldName = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Name of n:1 reference-Field from data-layer to reference-layer
+    _dataLyrReferenceFieldName = None
+
+    @property
+    def dataLyrReferenceFieldName(self):
+        return self._dataLyrReferenceFieldName
+
+    @dataLyrReferenceFieldName.setter
+    def dataLyrReferenceFieldName(self, value):
+        self._dataLyrReferenceFieldName = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Name of the data-layer-field for stationing_n
+    _dataLyrStationingFieldName = None
+
+    @property
+    def dataLyrStationingFieldName(self):
+        return self._dataLyrStationingFieldName
+
+    @dataLyrStationingFieldName.setter
+    def dataLyrStationingFieldName(self, value):
+        self._dataLyrStationingFieldName = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # ID of (mostly virtual) show-layer
+    _showLyrId = None
+
+    @property
+    def showLyrId(self):
+        return self._showLyrId
+
+    @showLyrId.setter
+    def showLyrId(self, value):
+        self._showLyrId = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # 1:1-reference-field between show- and data-layer, usually the PK-Fields in both layers
+    _showLyrBackReferenceFieldName = None
+
+    @property
+    def showLyrBackReferenceFieldName(self):
+        return self._showLyrBackReferenceFieldName
+
+    @showLyrBackReferenceFieldName.setter
+    def showLyrBackReferenceFieldName(self, value):
+        self._showLyrBackReferenceFieldName = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # storage-precision, stationings will get rounded
+    _storagePrecision = -1
+
+    @property
+    def storagePrecision(self):
+        if self._storagePrecision is None:
+            self._storagePrecision = -1
+        return int(self._storagePrecision)
+
+    @storagePrecision.setter
+    def storagePrecision(self, value):
+        self._storagePrecision = int(value)
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Symbolization with temporal canvas-graphics
+
+    # line-style for highlighted reference-line
+    _ref_line_style = 3
+
+    @property
+    def ref_line_style(self):
+        return int(self._ref_line_style)
+
+    @ref_line_style.setter
+    def ref_line_style(self, value):
+        self._ref_line_style = int(value)
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # line-width for highlighted reference-line
+    _ref_line_width = 2
+
+    @property
+    def ref_line_width(self):
+        return int(self._ref_line_width)
+
+    @ref_line_width.setter
+    def ref_line_width(self, value):
+        self._ref_line_width = int(value)
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # line-color for highlighted reference-line
+    _ref_line_color = '#96ffff7f'  # semi-transparent yellow
+
+    @property
+    def ref_line_color(self):
+        return self._ref_line_color
+
+    @ref_line_color.setter
+    def ref_line_color(self, value):
+        self._ref_line_color = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # line-color for Show-Layer, mint-green
+    # not customizable, but layer can be styled as any other vector-layer
+    # applied with opactity 0.8
+    # different to segment_line_color
+    _show_layer_default_point_color = '#90EE90'  # LightGreen
+
+    @property
+    def show_layer_default_point_color(self):
+        return self._show_layer_default_point_color
+
+    @show_layer_default_point_color.setter
+    def show_layer_default_point_color(self, value):
+        self._show_layer_default_point_color = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # symbolize a stationing_n on a line
+    # Icon-Type for Stationing-Canvas-Graphic
+    # 3 => Box
+    _pt_sn_icon_type = 3
+
+    @property
+    def pt_sn_icon_type(self):
+        return int(self._pt_sn_icon_type)
+
+    @pt_sn_icon_type.setter
+    def pt_sn_icon_type(self, value):
+        self._pt_sn_icon_type = int(value)
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Size for Stationing-Canvas-Graphic
+    _pt_sn_icon_size = 16
+
+    @property
+    def pt_sn_icon_size(self):
+        return int(self._pt_sn_icon_size)
+
+    @pt_sn_icon_size.setter
+    def pt_sn_icon_size(self, value):
+        self._pt_sn_icon_size = int(value)
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Pen-Width for Stationing-Canvas-Graphic == outline-width
+    _pt_sn_pen_width = 3
+
+    @property
+    def pt_sn_pen_width(self):
+        return int(self._pt_sn_pen_width)
+
+    @pt_sn_pen_width.setter
+    def pt_sn_pen_width(self, value):
+        self._pt_sn_pen_width = int(value)
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Color for Stationing-Canvas-Graphic == outine-color
+    # also used as initial fill-color for show-layer-n
+    _pt_sn_color = '#FF00FF00'  # lime
+
+    @property
+    def pt_sn_color(self):
+        return self._pt_sn_color
+
+    @pt_sn_color.setter
+    def pt_sn_color(self, value):
+        self._pt_sn_color = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+    # Fill-Color for Stationing-Canvas-Graphic
+    _pt_sn_fill_color = '#00ffffff'  # white transparent
+
+    @property
+    def pt_sn_fill_color(self):
+        return self._pt_sn_fill_color
+
+    @pt_sn_fill_color.setter
+    def pt_sn_fill_color(self, value):
+        self._pt_sn_fill_color = value
+        qgis.core.QgsProject.instance().setDirty(True)
+
+
+# QgsMapToolEmitPoint
 class PolEvt(qgis.gui.QgsMapToolEmitPoint):
-    """MapTool for Digitize Point-Events via reference-line and measured distance to startpoint"""
-    # Rev. 2023-04-22
-    my_dialogue = None
+    """MapTool for Digitize Point-Events via reference-line and measured stationing == run-length to a point on that line"""
+    # Rev. 2024-07-25
 
-    # IDs for identifying the layer-actions in dataLyr and showLyr, other IDs then DigitzeLineEvent
-    _lyr_act_id_1 = QtCore.QUuid('12345678-abcd-4321-dcba-0123456789ab')
-    _lyr_act_id_2 = QtCore.QUuid('87654321-DCBA-1234-abcd-ba9876543210')
+    # Nomenclature, functions beginning with...
+    # cvs_* => canvas-functions, draw, pan, zoom...
+    # cpe_xxx => canvasPressEvent-sub-function, xxx => self.session_data.tool_mode
+    # cme_xxx => canvasMoveEvent-sub-function, xxx => self.session_data.tool_mode
+    # cre_xxx => canvasReleaseEvent-sub-function, xxx => self.session_data.tool_mode
+    # dlg_* => dialog-functions, refresh parts of dialog...
+    # gui_* => gui-functions, e.g. layer-actions
+    # fvs* => check of feature-valid-state, stationing_n valid? referenced feature existing? see FVS
+    # s_* => slot-functions triggered by widgets in dialog
+    # ssc_* => slot-functions for configuration-change affecting stored_settings
+    # st_* => slot-functions triggered from tabular widgets inside dialog
+    # stm_* => functions to set a new tool-mode
+    # sys_* => system functions
+    # tool_* => auxiliary functions
 
-    # settings self.ss can be stored for later restore, f.e. if the Pluigin is used for multiple LinearReference-Layers in the same project
+    # the dialog for this MapTool as class-variable and later initialized as instance-variable
+    my_dialog = None
+
+    # log-message-count, incremented with dlg_append_log_message
+    lmc = 0
+
+    # IDs for identifying and later remove of the layer-actions in dataLyr and showLyr
+    _showLyr_act_id = QtCore.QUuid('12345678-abcd-4321-dcba-0123456789ab')
+    _dataLyr_act_id = QtCore.QUuid('87654321-dcba-1234-abcd-ba9876543210')
+
+    # a limited number of settings can be stored in and restored from the project-file
+    # (registered layers/fields, colors, symbols...)
     _num_storable_settings = 100
 
-    class StoredSettings:
-        """template for self.ss ➜ stored settings, string-vars, stored in QGis-Project and dataLyr
-        defined with property-getter-and-setter to register any user-setting-changes,
-        which then set the QGis-Project "dirty" and have these changes stored on project-unload with save
-        so every write-access to these properties, that should should not set the "dirty"-Flag, must be done to the _internal-properties
-        see store/restore_settings()
+    # max number of registered post-processing reference-features, whose original geometries are cached in a dictionary, to avoid overflow
+    _po_pro_max_ref_feature_count = 100
+
+    # max number of post-processing-features on the cached reference-features to avoid overflow
+    _po_pro_max_feature_count = 500
+
+    def dlg_append_log_message(self, message_type: str, message_content: str, show_status_message: bool = True):
+        """appends log-message to self.dialogue.qtw_log_messages
+        adds file-name and line-number for debug-convenience
+        different message-types are displayed with different durations
+        :param message_type: INFO/SUCCESS/WARNING/CRITICAL, implemented with specific background-colors
+        :param message_content:
+        :param show_status_message: additional show in dialog-status-bar
         """
-        # Rev. 2023-04-27
-        _refLyrId = None
-
-        @property
-        def refLyrId(self):
-            """ID of Reference-Layer"""
-            return self._refLyrId
-
-        @refLyrId.setter
-        def refLyrId(self, value):
-            self._refLyrId = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _refLyrIdFieldName = None
-
-        @property
-        def refLyrIdFieldName(self):
-            """Name of PK-Field in Reference-Layer"""
-            return self._refLyrIdFieldName
-
-        @refLyrIdFieldName.setter
-        def refLyrIdFieldName(self, value):
-            self._refLyrIdFieldName = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _dataLyrId = None
-
-        @property
-        def dataLyrId(self):
-            """ID of Data-Layer"""
-            return self._dataLyrId
-
-        @dataLyrId.setter
-        def dataLyrId(self, value):
-            self._dataLyrId = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _dataLyrIdFieldName = None
-
-        @property
-        def dataLyrIdFieldName(self):
-            """Name of PK-Field in Data-Layer"""
-            return self._dataLyrIdFieldName
-
-        @dataLyrIdFieldName.setter
-        def dataLyrIdFieldName(self, value):
-            self._dataLyrIdFieldName = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _dataLyrReferenceFieldName = None
-
-        @property
-        def dataLyrReferenceFieldName(self):
-            """Name of Reference-Field in Data-Layer"""
-            return self._dataLyrReferenceFieldName
-
-        @dataLyrReferenceFieldName.setter
-        def dataLyrReferenceFieldName(self, value):
-            self._dataLyrReferenceFieldName = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _dataLyrMeasureFieldName = None
-
-        @property
-        def dataLyrMeasureFieldName(self):
-            """Name of Measure-Field in Data-Layer"""
-            return self._dataLyrMeasureFieldName
-
-        @dataLyrMeasureFieldName.setter
-        def dataLyrMeasureFieldName(self, value):
-            self._dataLyrMeasureFieldName = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _showLyrId = None
-
-        @property
-        def showLyrId(self):
-            """ID of Show-Layer"""
-            return self._showLyrId
-
-        @showLyrId.setter
-        def showLyrId(self, value):
-            self._showLyrId = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _showLyrBackReferenceFieldName = None
-
-        @property
-        def showLyrBackReferenceFieldName(self):
-            """Name of Back-Reference-Field in Show-Layer for referencing Data-Layer"""
-            return self._showLyrBackReferenceFieldName
-
-        @showLyrBackReferenceFieldName.setter
-        def showLyrBackReferenceFieldName(self, value):
-            self._showLyrBackReferenceFieldName = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        # Dot
-        _ref_line_line_style = 3
-
-        @property
-        def ref_line_line_style(self):
-            """Style of highlighted reference-line"""
-            return int(self._ref_line_line_style)
-
-        @ref_line_line_style.setter
-        def ref_line_line_style(self, value):
-            self._ref_line_line_style = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _ref_line_width = 3
-
-        @property
-        def ref_line_width(self):
-            """Width of highlighted reference-line"""
-            return int(self._ref_line_width)
-
-        @ref_line_width.setter
-        def ref_line_width(self, value):
-            self._ref_line_width = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _ref_line_color = '#96ffffff'  # semi-transparent white
-
-        @property
-        def ref_line_color(self):
-            """Width of highlighted reference-line"""
-            return self._ref_line_color
-
-        @ref_line_color.setter
-        def ref_line_color(self, value):
-            self._ref_line_color = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        # ICON_CIRCLE
-        _pt_edit_icon_type = 4
-
-        @property
-        def pt_edit_icon_type(self):
-            """Icon-Type for Edit-Point-Canvas-Graphic"""
-            return int(self._pt_edit_icon_type)
-
-        @pt_edit_icon_type.setter
-        def pt_edit_icon_type(self, value):
-            self._pt_edit_icon_type = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_edit_icon_size = 15
-
-        @property
-        def pt_edit_icon_size(self):
-            """Size for Edit-Point-Canvas-Graphic"""
-            return int(self._pt_edit_icon_size)
-
-        @pt_edit_icon_size.setter
-        def pt_edit_icon_size(self, value):
-            self._pt_edit_icon_size = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_edit_pen_width = 3
-
-        @property
-        def pt_edit_pen_width(self):
-            """Pen-Width for Edit-Point-Canvas-Graphic"""
-            return int(self._pt_edit_pen_width)
-
-        @pt_edit_pen_width.setter
-        def pt_edit_pen_width(self, value):
-            self._pt_edit_pen_width = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_edit_color = '#ffff00ff'  # magenta
-
-        @property
-        def pt_edit_color(self):
-            """Color for Edit-Point-Canvas-Graphic"""
-            return self._pt_edit_color
-
-        @pt_edit_color.setter
-        def pt_edit_color(self, value):
-            self._pt_edit_color = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_edit_fill_color = '#00ffffff'  # white transparent
-
-        @property
-        def pt_edit_fill_color(self):
-            """Fill-Color for Edit-Point-Canvas-Graphic"""
-            return self._pt_edit_fill_color
-
-        @pt_edit_fill_color.setter
-        def pt_edit_fill_color(self, value):
-            self._pt_edit_fill_color = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        # ICON_BOX
-        _pt_measure_icon_type = 3
-
-        @property
-        def pt_measure_icon_type(self):
-            """Icon-Type for Measure-Canvas-Graphic"""
-            return int(self._pt_measure_icon_type)
-
-        @pt_measure_icon_type.setter
-        def pt_measure_icon_type(self, value):
-            self._pt_measure_icon_type = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_measure_icon_size = 10
-
-        @property
-        def pt_measure_icon_size(self):
-            """Size for Measure-Canvas-Graphic"""
-            return int(self._pt_measure_icon_size)
-
-        @pt_measure_icon_size.setter
-        def pt_measure_icon_size(self, value):
-            self._pt_measure_icon_size = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_measure_pen_width = 2
-
-        @property
-        def pt_measure_pen_width(self):
-            """Pen-Width for Measure-Canvas-Graphic"""
-            return int(self._pt_measure_pen_width)
-
-        @pt_measure_pen_width.setter
-        def pt_measure_pen_width(self, value):
-            self._pt_measure_pen_width = int(value)
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_measure_color = '#ffff0000'  # red
-
-        @property
-        def pt_measure_color(self):
-            """Color for Measure-Canvas-Graphic"""
-            return self._pt_measure_color
-
-        @pt_measure_color.setter
-        def pt_measure_color(self, value):
-            self._pt_measure_color = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-        _pt_measure_fill_color = '#00ffffff'  # white transparent
-
-        @property
-        def pt_measure_fill_color(self):
-            """Fill-Color for Measure-Canvas-Graphic"""
-            return self._pt_measure_fill_color
-
-        @pt_measure_fill_color.setter
-        def pt_measure_fill_color(self, value):
-            self._pt_measure_fill_color = value
-            qgis.core.QgsProject.instance().setDirty(True)
-
-    class DeferedSettings:
-        """template for self.ds, defered settings like layers, fields..."""
-        # Rev. 2023-04-28
-        refLyr = None
-        refLyrPkField = None
-        dataLyr = None
-        dataLyrIdField = None
-        dataLyrReferenceField = None
-        dataLyrMeasureField = None
-        showLyr = None
-        showLyrBackReferenceField = None
-
-    class RuntimeSettings:
-        """template for self.rs, Runtime-Settings"""
-        # Rev. 2023-04-28
-
-        # one of the possible toolmodes, see self::tool_modes
-        tool_mode = None
-
-        # int (allways): fid of the current snapped reference-line
-        snapped_ref_fid = None
-
-        # pk (mostly identical to FID) of the current edited Feature in Data-Layer
-        edit_pk = None
-
-        # current measure-result, distance of the snapped point to the start-point of the snapped reference-line
-        current_measure = None
-
-        # for interacive move of the measured point
-        last_measure = None
-
-        # PointXY, set via canvasPressEvent
-        mouse_down_point = None
-
-        # PointXY, set via canvasReleaseEvent
-        mouse_up_point = None
-
-        # list of pre-selected Data-Layer-PKs for edit
-        selected_pks = []
-
-        #  for display of coordinates and measurements, dependend on canvas-projection
-        num_digits = 1
-
-        # register all signal-slot-connections to the three layer for later accurate disconnects
-        data_layer_connections = []
-        reference_layer_connections = []
-        show_layer_connections = []
-
-    class CheckFlags:
-        """"template for self.cf, often needed group-flags, set to False/True in self.check_settings if settings/capabilities/interim results are sufficient"""
-        # Rev. 2023-04-28
-        reference_layer_defined = False
-        reference_layer_complete = False
-        data_layer_defined = False
-        data_layer_complete = False
-        show_layer_defined = False
-        show_layer_complete = False
-        measure_completed = False
-        insert_enabled = False
-        update_enabled = False
-        delete_enabled = False
+        # Rev. 2024-07-25
+        if self.my_dialog:
+            # counter-variable and message-range
+            self.lmc += 1
+
+            # debug-info
+            file, line, function = get_debug_file_line(2)
+
+            base_font = QtGui.QFont()
+
+            # ExtraBold to symbolize the new messages, can be set to normal for all existing messages font via dlg_check_log_messages
+            bold_font = QtGui.QFont(base_font)
+            bold_font.setPointSize(10)
+            bold_font.setWeight(81)
+
+            lmc_item = QtGui.QStandardItem()
+            lmc_item.setData(self.lmc, 0)
+            lmc_item.setData(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignCenter, QtCore.Qt.TextAlignmentRole)
+            lmc_item.setData(bold_font, QtCore.Qt.FontRole)
+
+            time_item = QtGui.QStandardItem()
+            time_item.setData(QtCore.QDateTime.currentDateTime(), 0)
+            time_item.setData(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignCenter, QtCore.Qt.TextAlignmentRole)
+            time_item.setData(bold_font, QtCore.Qt.FontRole)
+
+            file_item = QtGui.QStandardItem()
+            file_item.setData(os.path.basename(file), 0)
+            file_item.setData(file, QtCore.Qt.ToolTipRole)
+            file_item.setData(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, QtCore.Qt.TextAlignmentRole)
+            file_item.setData(bold_font, QtCore.Qt.FontRole)
+
+            function_item = QtGui.QStandardItem()
+            function_item.setData(function, 0)
+            function_item.setData(function, QtCore.Qt.ToolTipRole)
+            function_item.setData(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, QtCore.Qt.TextAlignmentRole)
+            function_item.setData(bold_font, QtCore.Qt.FontRole)
+
+            line_item = QtGui.QStandardItem()
+            line_item.setData(line, 0)
+            line_item.setData(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, QtCore.Qt.TextAlignmentRole)
+            line_item.setData(bold_font, QtCore.Qt.FontRole)
+
+            level_item = QtGui.QStandardItem()
+            level_item.setData(message_type, 0)
+            level_item.setData(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignCenter, QtCore.Qt.TextAlignmentRole)
+            level_item.setData(bold_font, QtCore.Qt.FontRole)
+
+            # different background-colors to symbolize message-type
+            if message_type == 'WARNING':
+                level_item.setBackground(QtGui.QColor('#FFB839'))
+            elif message_type == 'SUCCESS':
+                level_item.setBackground(QtGui.QColor('#B9FFBD'))
+            elif message_type == 'INFO':
+                level_item.setBackground(QtGui.QColor('#AFC8FF'))
+            elif message_type == 'CRITICAL':
+                level_item.setBackground(QtGui.QColor('#FF3939'))
+
+            message_item = QtGui.QStandardItem()
+            message_item.setData(message_content, 0)
+            message_item.setData(bold_font, QtCore.Qt.FontRole)
+
+            self.my_dialog.qtw_log_messages.model().appendRow([lmc_item, time_item, level_item, message_item, file_item, line_item, function_item])
+
+            # count "uncommitted" messages => font-weight bold in TableView
+            ucc = 0
+            for rc in range(self.my_dialog.qtw_log_messages.model().rowCount()):
+                item_0 = self.my_dialog.qtw_log_messages.model().item(rc, 0)
+                if item_0.data(QtCore.Qt.FontRole) != QtGui.QFont():
+                    ucc += 1
+
+            # refresh the tab-text with the number of new messages
+            self.my_dialog.tbw_central.tabBar().setTabText(4, MY_DICT.tr('log_tab') + ' *' + str(ucc))
+
+            if message_type == 'WARNING':
+                # symbolize with red tab-text-color
+                self.my_dialog.tbw_central.tabBar().setTabTextColor(4, QtGui.QColor('red'))
+
+            elif message_type == 'CRITICAL':
+                # symbolize with red tab-text-color
+                self.my_dialog.tbw_central.tabBar().setTabTextColor(4, QtGui.QColor('red'))
+                #  and open the message-log-tab
+                self.my_dialog.tbw_central.setCurrentIndex(4)
+
+            # vorhergehende Sortierung wiederherstellen
+            self.my_dialog.qtw_log_messages.sortByColumn(self.my_dialog.qtw_log_messages.horizontalHeader().sortIndicatorSection(), self.my_dialog.qtw_log_messages.horizontalHeader().sortIndicatorOrder())
+            self.my_dialog.qtw_log_messages.resizeRowsToContents()
+            self.my_dialog.qtw_log_messages.resizeColumnsToContents()
+
+            # Additional output to Dialog-Status-Bar
+            if show_status_message:
+                self.dlg_show_status_message(message_type, message_content)
+
+    def dlg_clear_log_messages(self):
+        """method clears qtw_log_messages and resets tabText-content and -color"""
+        # Rev. 2024-07-25
+        self.my_dialog.qtw_log_messages.model().removeRows(0, self.my_dialog.qtw_log_messages.model().rowCount())
+        self.my_dialog.tbw_central.tabBar().setTabText(4, MY_DICT.tr('log_tab'))
+        self.my_dialog.tbw_central.tabBar().setTabTextColor(4, QtGui.QColor('black'))
+
+    def dlg_check_log_messages(self):
+        """method removes bold-font from new appended messages and resets tabText-content and -color"""
+        # Rev. 2024-07-25
+
+        for rc in range(self.my_dialog.qtw_log_messages.model().rowCount()):
+            for cc in range(self.my_dialog.qtw_log_messages.model().columnCount()):
+                # apply default-font
+                item = self.my_dialog.qtw_log_messages.model().item(rc, cc)
+                item.setData(QtGui.QFont(), QtCore.Qt.FontRole)
+
+        # reset tab-text (remove *number of new messages)
+        self.my_dialog.tbw_central.tabBar().setTabText(4, MY_DICT.tr('log_tab'))
+        # reset possibly red-tab-text-color of last WARNING or WARNING-Message
+        self.my_dialog.tbw_central.tabBar().setTabTextColor(4, QtGui.QColor('black'))
 
     def __init__(self, iface: qgis.gui.QgisInterface):
-        """initialize
-        :param iface: qgis.gui.QgisInterface "Abstract base class defining interfaces exposed by QgisApp and made available to plugins."
+        """initialize this mapTool
+        :param iface: interface to QgisApp
         """
-        # Rev. 2023-04-28
+
         qgis.gui.QgsMapToolEmitPoint.__init__(self, iface.mapCanvas())
 
+        # iface for access to QGis-Qt-Application
         self.iface = iface
-        """qgis.gui.QgisInterface: Access to QGis-Qt-Application"""
 
-        # possible values for rs.tool_mode, key: rs.tool_mode, value: Explanation for status-bar
+        # nested dictionary, register for each plugin-connected layer-signal (data-layer, reference-layer, show-layer)
+        # to avoid double-connect and ensure later disconnect
+        # keys: layer_id > conn_signal > conn_function => conn_id
+        self.signal_slot_cons = {}
+
+        # list of application-slot-connections, which have to be disconnected on unload, f. e. add/remove layer
+        self.application_slot_cons = []
+
+        # list of canvas-slot-connections, which have to be disconnected on unload, f. e. change of canvas projection
+        self.canvas_slot_cons = []
+
+        # qgis.gui.QgsSnapIndicator: tiny snap-icon
+        # must be stored as reference
+        # any access to qgis.gui.QgsSnapIndicator(self.iface.mapCanvas()) will not affect self.snap_indicator
+        # the icon is used with some canvasMoveEvents
+        self.snap_indicator = qgis.gui.QgsSnapIndicator(self.iface.mapCanvas())
+
+        # role for the data_fid in self.my_dialog.qtrv_feature_selection.model()
+        self.data_fid_role = 257
+
+        # role for the ref_fid in self.my_dialog.qcbn_reference_feature
+        self.ref_fid_role = 258
+
+        # role for the label of the stored configuration in self.my_dialog.lw_stored_settings
+        self.configuration_label_role = 259
+
+        # role for the column-sort in self.my_dialog.qtrv_feature_selection.model(), see QTableWidgetItemCustomSort
+        self.custom_sort_role = 260
+
+        # role for the show_fid in self.my_dialog.qtrv_feature_selection.model()
+        self.show_fid_role = 261
+
+        # role for some QComboBoxes in the settings-section, which hold the settings-key-value (layers, fields, line-styles, line-widths, symbol-types etc.)
+        # uses Qt.UserRole == 256 for simplicity, because this role is used by
+        # QComboBox.addItem(const QString &text, const QVariant &userData = QVariant())
+        # and as default for QComboBox.currentData(int role = Qt::UserRole)
+        self.setting_key_role = 256
+
+        # possible values for runtime_settings.tool_mode, key: runtime_settings.tool_mode, value: Explanation for status-bar, translated
         self.tool_modes = {
-            'init': QtCore.QCoreApplication.translate('PolEvt', "Initializing, please wait..."),
-            'measuring': QtCore.QCoreApplication.translate('PolEvt', "hover on Reference-Layer-feature to show coords, click to take a measurement..."),
-            'after_measure': QtCore.QCoreApplication.translate('PolEvt', "Measurement taken; edit results/insert feature or resume..."),
-            'before_move_point': QtCore.QCoreApplication.translate('PolEvt', "drag and drop measured point on selected line..."),
-            'move_point': QtCore.QCoreApplication.translate('PolEvt', "drop the point at the desired position of the selected line..."),
-            'disabled': QtCore.QCoreApplication.translate('PolEvt', "no Reference-Layer configured..."),
-            'select_features': QtCore.QCoreApplication.translate('PolEvt', "select features from Show-Layer with point or rect; [ctrl] remove from, [shift] add to, [ ] replace current feature-selection"),
+            'initialized': MY_DICT.tr('pol_toolmode_initialized'),
+            'pausing': MY_DICT.tr('pol_toolmode_pausing'),
+            'measure_stationing': MY_DICT.tr('pol_toolmode_measure_stationing'),
+            'select_features': MY_DICT.tr('pol_toolmode_select_features'),
+            'move_stationing': MY_DICT.tr('pol_toolmode_move_stationing'),
+            'move_feature': MY_DICT.tr('pol_toolmode_move_feature'),
+            'reposition_feature': MY_DICT.tr('pol_toolmode_reposition_feature'),
+            'move_po_pro_feature': MY_DICT.tr('pol_toolmode_move_po_pro_feature'),
+
         }
 
-        # initialize the four settings-"containers" with blank "templates"
-        self.ss = self.StoredSettings()
-        self.ds = self.DeferedSettings()
-        self.cf = self.CheckFlags()
-        self.rs = self.RuntimeSettings()
+        self.system_vs = self.SVS.INIT
 
-        self.restore_settings()
+        # initialize the settings-"containers" with blank "templates"
+        self.stored_settings = StoredSettings()
+        self.derived_settings = DerivedSettings()
+        self.session_data = SessionData()
 
-        # visualize selected point for edit
-        self.vm_pt_edit = qgis.gui.QgsVertexMarker(self.iface.mapCanvas())
-        self.vm_pt_edit.hide()
+        # restore settings from last usage in this project
+        self.sys_restore_settings()
 
-        # visualize snapped point on reference-line
-        self.vm_pt_measure = qgis.gui.QgsVertexMarker(self.iface.mapCanvas())
-        self.vm_pt_measure.hide()
+        # temporal canvas-graphics, partially with user-customizable symbolizations
+        # z-index dependend on insertion order:
+
+        # visualize stationed point on reference-line
+        self.vm_sn = qgis.gui.QgsVertexMarker(self.iface.mapCanvas())
+
+        # circle/square to mark selected point for edit
+        self.vm_en = qgis.gui.QgsVertexMarker(self.iface.mapCanvas())
+
+        # symbolize reference_geometry-changes, altered segments in current geometry
+        self.rb_rfl_diff_cu = qgis.gui.QgsRubberBand(self.iface.mapCanvas(), qgis.core.QgsWkbTypes.LineGeometry)
+
+        # symbolize reference_geometry-changes, altered segments in cached geometry
+        self.rb_rfl_diff_ca = qgis.gui.QgsRubberBand(self.iface.mapCanvas(), qgis.core.QgsWkbTypes.LineGeometry)
 
         # visualize snapped reference-line
-        self.rb_ref = qgis.gui.QgsRubberBand(self.iface.mapCanvas(), qgis.core.QgsWkbTypes.LineGeometry)
-        self.rb_ref.hide()
+        self.rb_rfl = qgis.gui.QgsRubberBand(self.iface.mapCanvas(), qgis.core.QgsWkbTypes.LineGeometry)
 
         # selection-rectangle
         self.rb_selection_rect = qgis.gui.QgsRubberBand(self.iface.mapCanvas())
+
+        # symbols for cached PostProcessing-Features, cached stationing-from on cached reference-shape
+        self.vm_pt_cn = qgis.gui.QgsVertexMarker(self.iface.mapCanvas())
+
+        # symbol for cached reference-line, defined but not used
+        self.rb_crfl = qgis.gui.QgsRubberBand(self.iface.mapCanvas(), qgis.core.QgsWkbTypes.LineGeometry)
+
+        # apply the styles
+        self.cvs_apply_style_to_graphics()
+
+        # and initially hide them
+        self.cvs_hide_markers()
+
+        # change of QGIS3.ini rsp. QGis > Settings > General:  f. e. language, number format etc. => complete reload
+        conn_id = qgis.core.QgsApplication.instance().customVariablesChanged.connect(self.gui_refresh)
+        self.application_slot_cons.append(conn_id)
+
+        # connect some signals in project to register TOC-changes (especially layersRemoved)
+        conn_id = qgis.core.QgsProject.instance().layersAdded.connect(self.s_project_layers_added)
+        self.application_slot_cons.append(conn_id)
+
+        conn_id = qgis.core.QgsProject.instance().layersRemoved.connect(self.s_project_layers_removed)
+        self.application_slot_cons.append(conn_id)
+
+        # triggered *before* the project is saved to file
+        # store the plugin-settings in project-file
+        qgis.core.QgsProject.instance().writeProject.connect(self.sys_store_settings)
+
+        # change of projection => replace some unit-widgets in dialog
+        conn_id = self.iface.mapCanvas().destinationCrsChanged.connect(self.dlg_apply_canvas_crs)
+        self.canvas_slot_cons.append(conn_id)
+
+        self.sys_check_settings()
+        self.dlg_init()
+
+        self.dlg_append_log_message('SUCCESS', MY_DICT.tr('PolEvt_initialized'))
+
+        self.session_data.tool_mode = 'initialized'
+        self.dlg_show_tool_mode()
+
+        if self.derived_settings.refLyr is not None:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('reference_layer_auto_loaded', self.derived_settings.refLyr.name()))
+            # self.stm_measure_stationing()
+        else:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('load_reference_layer'))
+
+    def canvasPressEvent(self, event: qgis.gui.QgsMapMouseEvent) -> None:
+        """mouseDown on canvas, reimplemented standard-function for qgis.gui.QgsMapToolIdentify
+        triggered action self.cpe_xxx dependend on self.session_data.tool_mode
+        see canvasMoveEvent and canvasReleaseEvent
+        :param event:
+        """
+        # Rev. 2024-07-25
+
+        self.my_dialog.dnspbx_canvas_x.setValue(event.mapPoint().x())
+        self.my_dialog.dnspbx_canvas_y.setValue(event.mapPoint().y())
+
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            if self.session_data.tool_mode == 'pausing':
+                # convenience for tool_mode 'pausing': switch-back to previous_tool_mode
+                previous_tool_mode = self.session_data.previous_tool_mode
+                if previous_tool_mode == 'move_stationing':
+                    self.stm_move_stationing()
+                elif previous_tool_mode == 'measure_stationing':
+                    self.stm_measure_stationing()
+                elif previous_tool_mode == 'move_feature':
+                    if self.session_data.edit_feature:
+                        self.stm_move_feature(self.session_data.edit_feature.data_fid)
+                elif previous_tool_mode == 'reposition_feature':
+                    if self.session_data.edit_feature:
+                        self.stm_reposition_feature(self.session_data.edit_feature.data_fid)
+                elif previous_tool_mode == 'move_po_pro_feature':
+                    if self.session_data.po_pro_feature:
+                        self.stm_move_po_pro_feature(self.session_data.po_pro_feature.data_fid)
+
+            if self.session_data.tool_mode == 'measure_stationing':
+                self.cpe_measure_stationing(event)
+            elif self.session_data.tool_mode == 'move_stationing':
+                self.cpe_move_stationing(event)
+            elif self.session_data.tool_mode == 'select_features':
+                self.cpe_select_features(event)
+            elif self.session_data.tool_mode == 'move_feature':
+                self.cpe_move_feature(event)
+            elif self.session_data.tool_mode == 'reposition_feature':
+                self.cpe_reposition_feature(event)
+            elif self.session_data.tool_mode == 'move_po_pro_feature':
+                self.cpe_move_po_pro_feature(event)
+
+    def canvasMoveEvent(self, event: qgis.gui.QgsMapMouseEvent) -> None:
+        """MouseMove on canvas, reimplemented standard-function for qgis.gui.QgsMapToolIdentify
+        triggered action self.cme_xxx dependend on self.session_data.tool_mode
+        see canvasPressEvent and canvasReleaseEvent
+        :param event:
+        """
+        # Rev. 2024-07-25
+        self.my_dialog.dnspbx_canvas_x.setValue(event.mapPoint().x())
+        self.my_dialog.dnspbx_canvas_y.setValue(event.mapPoint().y())
+
+        if self.session_data.tool_mode == 'pausing':
+            pass
+        elif self.session_data.tool_mode == 'measure_stationing':
+            self.cme_measure_stationing(event)
+        elif self.session_data.tool_mode == 'move_stationing':
+            self.cme_move_stationing(event)
+        elif self.session_data.tool_mode == 'select_features':
+            self.cme_select_features(event)
+        elif self.session_data.tool_mode == 'move_feature':
+            self.cme_move_feature(event)
+        elif self.session_data.tool_mode == 'reposition_feature':
+            self.cme_reposition_feature(event)
+        elif self.session_data.tool_mode == 'move_po_pro_feature':
+            self.cme_move_po_pro_feature(event)
+
+    def canvasReleaseEvent(self, event: qgis.gui.QgsMapMouseEvent) -> None:
+        """mouseUp on canvas, reimplemented standard-function for qgis.gui.QgsMapToolIdentify
+        triggered action self.cre_xxx dependend on self.session_data.tool_mode
+        see canvasPressEvent and canvasMoveEvent
+        :param event:
+        """
+        # Rev. 2024-07-25
+        self.my_dialog.dnspbx_canvas_x.setValue(event.mapPoint().x())
+        self.my_dialog.dnspbx_canvas_y.setValue(event.mapPoint().y())
+
+        # hide snap_indicator after each mouse-release by setting a dummy (==invalid) match
+        self.cvs_hide_snap()
+        if self.session_data.tool_mode == 'pausing':
+            pass
+        elif self.session_data.tool_mode == 'measure_stationing':
+            self.cre_measure_stationing(event)
+        elif self.session_data.tool_mode == 'move_stationing':
+            self.cre_move_stationing(event)
+        elif self.session_data.tool_mode == 'select_features':
+            self.cre_select_features(event)
+        elif self.session_data.tool_mode == 'move_feature':
+            self.cre_move_feature(event)
+        elif self.session_data.tool_mode == 'reposition_feature':
+            self.cre_reposition_feature(event)
+        elif self.session_data.tool_mode == 'move_po_pro_feature':
+            self.cre_move_po_pro_feature(event)
+
+    def stm_measure_stationing(self):
+        """set tool mode 'measure_stationing'"""
+        # Rev. 2024-07-25
+        if self.sys_set_tool_mode('measure_stationing'):
+            self.session_data.measure_feature = None
+            self.cvs_hide_markers()
+            self.cvs_hide_snap()
+            self.dlg_clear_measurements()
+            self.dlg_unselect_qcbn_reference_feature()
+            self.dlg_clear_canvas_coords()
+            self.dlg_refresh_measure_section()
+
+    def cme_measure_stationing(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas move for tool_mode 'measure_stationing'"""
+        # Rev. 2024-07-25
+        event_with_left_btn = bool(QtCore.Qt.LeftButton & event.buttons())
+        self.cvs_hide_snap()
+        self.cvs_hide_markers(['sn', 'rfl'])
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            pol_mouse_move = PoLFeature()
+            match = pol_mouse_move.snap_to_layer(event, self.derived_settings.refLyr)
+            if match.isValid():
+                self.dlg_refresh_measurements(pol_mouse_move)
+                if event_with_left_btn:
+                    self.cvs_draw_feature(pol_mouse_move, ['sn', 'rfl'])
+                else:
+                    self.cvs_show_snap(match)
+
+    def cpe_measure_stationing(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas press for tool_mode 'measure_stationing'"""
+        # Rev. 2024-07-25
+        self.session_data.measure_feature = None
+        self.dlg_clear_measurements()
+        self.cvs_hide_markers(['sn', 'rfl'])
+        self.cvs_hide_snap()
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            pol_mouse_press = PoLFeature()
+            match = pol_mouse_press.snap_to_layer(event, self.derived_settings.refLyr)
+            if match.isValid():
+                self.dlg_refresh_measurements(pol_mouse_press)
+                self.cvs_draw_feature(pol_mouse_press, ['sn', 'rfl'])
+
+    def cre_measure_stationing(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas release for tool_mode 'measure_stationing'"""
+        # Rev. 2024-07-25
+        self.session_data.measure_feature = None
+        self.dlg_clear_measurements()
+        self.cvs_hide_markers(['sn', 'rfl'])
+        self.cvs_hide_snap()
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            pol_mouse_up = PoLFeature()
+            match = pol_mouse_up.snap_to_layer(event, self.derived_settings.refLyr)
+            if match.isValid():
+                self.session_data.measure_feature = pol_mouse_up
+                self.cvs_draw_feature(self.session_data.measure_feature, ['sn', 'rfl'])
+                self.dlg_refresh_measurements(self.session_data.measure_feature)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_release_match_on_reference_layer'))
+
+            self.dlg_refresh_measure_section()
+            self.sys_set_tool_mode('pausing')
+
+    def stm_move_stationing(self):
+        """set tool mode 'move_stationing'"""
+        # Rev. 2024-07-25
+        if self.sys_set_tool_mode('move_stationing'):
+            if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+                extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+                self.cvs_draw_feature(self.session_data.measure_feature, draw_markers=['sn', 'en', 'rfl'], extent_markers=['sn'], extent_mode=extent_mode)
+                self.dlg_refresh_measurements(self.session_data.measure_feature)
+
+    def cpe_move_stationing(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas press for tool_mode 'move_stationing'"""
+        # Rev. 2024-07-25
+        self.session_data.pol_mouse_move = None
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs and self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+            pol_mouse_down = PoLFeature()
+            match = pol_mouse_down.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.measure_feature.ref_fid)
+            if match.isValid():
+                # use snapped mouse-press-position as new measure_feature
+                self.session_data.measure_feature = pol_mouse_down
+                self.cvs_draw_feature(self.session_data.measure_feature, draw_markers=['sn'])
+                self.dlg_refresh_measurements(self.session_data.measure_feature)
+                self.cvs_hide_snap()
+            else:
+                self.cvs_show_snap(match)
+
+    def cme_move_stationing(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas move for tool_mode 'move_stationing'"""
+        # Rev. 2024-07-25
+        event_with_left_btn = bool(QtCore.Qt.LeftButton & event.buttons())
+        self.cvs_hide_snap()
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs and self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+            pol_mouse_move = PoLFeature()
+            match = pol_mouse_move.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.measure_feature.ref_fid)
+            if match.isValid():
+                if event_with_left_btn:
+                    self.cvs_draw_feature(pol_mouse_move, draw_markers=['sn'])
+                    self.dlg_refresh_measurements(pol_mouse_move)
+                else:
+                    self.cvs_show_snap(match)
+
+    def cre_move_stationing(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas release for tool_mode 'move_stationing'"""
+        # Rev. 2024-07-25
+        self.dlg_clear_measurements()
+        self.cvs_hide_markers(['sn', 'en', 'rfl'])
+        self.cvs_hide_snap()
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs and self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+            pol_mouse_up = PoLFeature()
+            match = pol_mouse_up.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.measure_feature.ref_fid)
+            if match.isValid():
+                self.session_data.measure_feature = pol_mouse_up
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_release_match_on_reference_layer'))
+
+            self.cvs_draw_feature(self.session_data.measure_feature, ['sn', 'rfl'])
+            self.dlg_refresh_measurements(self.session_data.measure_feature)
+            self.dlg_refresh_measure_section()
+            self.sys_set_tool_mode('pausing')
+
+    def stm_select_features(self):
+        """set tool-mode select_features: select referenced features from showLyr to feature-selection"""
+        # Rev. 2024-07-25
+        self.sys_set_tool_mode('select_features')
+
+    def cpe_select_features(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas press for tool_mode 'select_features'"""
+        # Rev. 2024-07-25
+        event_with_left_btn = bool(QtCore.Qt.LeftButton & event.buttons())
+        self.session_data.pol_mouse_down = None
         self.rb_selection_rect.hide()
+        if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs and event_with_left_btn:
+            # dummy, only for draw a canvas rect in cme_select_features and check via screen_x/screen_y if a point or a rect is drawn in cre_select_features
+            self.session_data.pol_mouse_down = PoLFeature()
+            self.session_data.pol_mouse_down.screen_x = event.pixelPoint().x()
+            self.session_data.pol_mouse_down.screen_y = event.pixelPoint().y()
+            self.session_data.pol_mouse_down.map_x = event.mapPoint().x()
+            self.session_data.pol_mouse_down.map_y = event.mapPoint().y()
 
-        self.refresh_canvas_graphics()
+    def cme_select_features(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas move for tool_mode 'select_features'"""
+        # Rev. 2024-07-25
+        event_with_left_btn = bool(QtCore.Qt.LeftButton & event.buttons())
+        if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs and self.session_data.pol_mouse_down is not None and self.session_data.pol_mouse_down.map_x is not None and self.session_data.pol_mouse_down.map_y is not None and event_with_left_btn:
+            # draw selection-rectangle with canvas-coords
+            down_pt_map = qgis.core.QgsPointXY(self.session_data.pol_mouse_down.map_x, self.session_data.pol_mouse_down.map_y)
+            move_pt_map = qgis.core.QgsPointXY(event.mapPoint().x(), event.mapPoint().y())
+            selection_geom = qgis.core.QgsGeometry.fromRect(qgis.core.QgsRectangle(down_pt_map, move_pt_map))
+            self.rb_selection_rect.setToGeometry(selection_geom, None)
+            self.rb_selection_rect.show()
 
-        self.snap_indicator = qgis.gui.QgsSnapIndicator(self.iface.mapCanvas())
-        """qgis.gui.QgsSnapIndicator: the tiny snap-icon"""
+    def cre_select_features(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas release for tool_mode 'select_features'"""
+        # Rev. 2024-07-25
+        # Note: event_with_left_btn allways returns False for canvasReleaseEvents!
+        if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs and self.session_data.pol_mouse_down is not None:
+            # different select-behaviours dependend from chtrl/shift-modifier
+            #  no modifier => new selection
+            selection_mode = 'new_selection'
+            if QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers():
+                selection_mode = 'remove_from_selection'
+            elif QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers():
+                selection_mode = 'add_to_selection'
 
-        self.my_dialogue = dialogs.PolDialog(iface)
-        self.my_dialogue.dialog_close.connect(self.s_dialog_close)
+            if self.session_data.pol_mouse_down.screen_x == event.pixelPoint().x() and self.session_data.pol_mouse_down.screen_y == event.pixelPoint().y():
+                # screen_x/screen_y same as registered in pol_mouse_down => klick => Point => buffered to selection rect
+                delta_pixel = 3
+                min_x = self.session_data.pol_mouse_down.screen_x - delta_pixel
+                max_x = self.session_data.pol_mouse_down.screen_x + delta_pixel
+                min_y = self.session_data.pol_mouse_down.screen_y - delta_pixel
+                max_y = self.session_data.pol_mouse_down.screen_y + delta_pixel
+                down_pt_map = self.iface.mapCanvas().getCoordinateTransform().toMapCoordinates(QtCore.QPoint(min_x, min_y))
+                up_pt_map = self.iface.mapCanvas().getCoordinateTransform().toMapCoordinates(QtCore.QPoint(max_x, max_y))
 
-        # Section "Measure"
-        self.my_dialogue.measure_grb.toggled.connect(self.s_measure_grb_toggle)
-        self.my_dialogue.qcbn_snapped_ref_fid.currentIndexChanged.connect(self.s_zoom_to_ref_feature)
-        self.my_dialogue.pb_open_ref_form.clicked.connect(self.s_open_ref_form)
-        self.my_dialogue.pb_zoom_to_ref_feature.clicked.connect(self.s_zoom_to_ref_feature)
+            else:
+                down_pt_map = qgis.core.QgsPointXY(self.session_data.pol_mouse_down.map_x, self.session_data.pol_mouse_down.map_y)
+                up_pt_map = event.mapPoint()
 
-        self.my_dialogue.dspbx_measure.valueChanged.connect(self.s_measure_edited)
-        self.my_dialogue.dspbx_measure_fract.valueChanged.connect(self.s_measure_fract_edited)
+            selection_geom = qgis.core.QgsGeometry.fromRect(qgis.core.QgsRectangle(down_pt_map, up_pt_map))
+            selection_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.derived_settings.refLyr.crs(), qgis.core.QgsProject.instance()))
 
-        self.my_dialogue.tbtn_move_start.clicked.connect(self.s_move_start)
-        self.my_dialogue.tbtn_move_down.clicked.connect(self.s_move_down)
+            request = qgis.core.QgsFeatureRequest()
+            request.setFilterRect(selection_geom.boundingBox())
+            request.setFlags(qgis.core.QgsFeatureRequest.ExactIntersect)
 
-        self.my_dialogue.pbtn_move_point.clicked.connect(self.s_move_point)
+            layer_selected_ids = [f.id() for f in self.derived_settings.showLyr.getFeatures(request)]
 
-        self.my_dialogue.tbtn_move_up.clicked.connect(self.s_move_up)
-        self.my_dialogue.tbtn_move_end.clicked.connect(self.s_move_end)
-        self.my_dialogue.pb_pan_to_measure.clicked.connect(self.s_pan_to_measure)
-        self.my_dialogue.pbtn_resume_measure.clicked.connect(self.s_resume_measure)
+            # warning, if new and uncommitted features were selected
+            # these features will appear in the getFeatures-result all with id() = 0
+            # Note: multiple uncommitted features appear together as only one line in the associated attribute tables of the virtual layers
+            num_uncommitted = layer_selected_ids.count(0)
 
-        # Section "Edit"
-        self.my_dialogue.edit_grb.toggled.connect(self.s_edit_grb_toggle)
-        self.my_dialogue.pbtn_update_feature.clicked.connect(self.s_update_feature)
-        self.my_dialogue.pbtn_insert_feature.clicked.connect(self.s_insert_feature)
-        self.my_dialogue.pbtn_delete_feature.clicked.connect(self.s_delete_feature)
+            if num_uncommitted:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('uncommitted_features_selected_on_map', num_uncommitted))
 
-        # Section "Feature-Selection":
-        self.my_dialogue.selection_grb.toggled.connect(self.s_toggle_selection_grb)
-        self.my_dialogue.pbtn_select_features.clicked.connect(self.s_select_features)
-        self.my_dialogue.pbtn_insert_all_features.clicked.connect(self.s_append_all_features)
-        self.my_dialogue.pbtn_insert_selected_data_features.clicked.connect(self.s_append_data_features)
-        self.my_dialogue.pbtn_insert_selected_show_features.clicked.connect(self.s_append_show_features)
-        self.my_dialogue.pbtn_zoom_to_feature_selection.clicked.connect(self.s_zoom_to_feature_selection)
-        self.my_dialogue.pbtn_clear_features.clicked.connect(self.s_clear_feature_selection)
+            if 0 in layer_selected_ids:
+                layer_selected_ids.remove(0)
 
-        # Section "Layers and Fields"
-        self.my_dialogue.layers_and_fields_grb.toggled.connect(self.s_toggle_layers_and_fields_grb)
-        self.my_dialogue.qcbn_reference_layer.currentIndexChanged.connect(self.s_change_reference_layer)
-        self.my_dialogue.qcbn_reference_layer_id_field.currentIndexChanged.connect(self.s_change_reference_layer_id_field)
-        self.my_dialogue.pb_open_ref_tbl.clicked.connect(self.s_open_ref_tbl)
-        self.my_dialogue.pb_call_ref_disp_exp_dlg.clicked.connect(self.s_define_ref_lyr_display_expression)
+            if len(layer_selected_ids) > 0:
+                # like implemented in QGis-Select-Features:
+                if selection_mode == 'remove_from_selection':
+                    for new_id in layer_selected_ids:
+                        if new_id in self.session_data.selected_fids:
+                            self.session_data.selected_fids.remove(new_id)
+                elif selection_mode == 'add_to_selection':
+                    self.session_data.selected_fids += layer_selected_ids
+                    if len(layer_selected_ids) == 1:
+                        # only one feature selected:
+                        self.tool_select_feature(layer_selected_ids[0], ['sn', 'rfl'])
+                else:
+                    # selection_mode == 'new_selection'
+                    self.session_data.selected_fids = layer_selected_ids
+                    if len(layer_selected_ids) == 1:
+                        # only one feature selected:
+                        self.tool_select_feature(layer_selected_ids[0], ['sn', 'rfl'])
 
-        self.my_dialogue.qcbn_data_layer.currentIndexChanged.connect(self.s_change_data_layer)
-        self.my_dialogue.pb_open_data_tbl.clicked.connect(self.s_open_data_tbl)
-        self.my_dialogue.pbtn_create_data_layer.clicked.connect(self.s_create_data_layer)
-        self.my_dialogue.pb_call_data_disp_exp_dlg.clicked.connect(self.s_define_data_lyr_display_expression)
+                self.tool_check_selected_ids()
 
-        self.my_dialogue.qcbn_data_layer_id_field.currentIndexChanged.connect(self.s_change_data_layer_id_field)
-        self.my_dialogue.qcbn_data_layer_reference_field.currentIndexChanged.connect(self.s_change_data_layer_reference_field)
-        self.my_dialogue.qcbn_data_layer_measure_field.currentIndexChanged.connect(self.s_change_data_layer_measure_field)
-        self.my_dialogue.qcbn_show_layer.currentIndexChanged.connect(self.s_change_show_layer)
-        self.my_dialogue.pb_open_show_tbl.clicked.connect(self.s_open_show_lyr_tbl)
-        self.my_dialogue.pb_call_show_disp_exp_dlg.clicked.connect(self.s_define_show_lyr_display_expression)
-        self.my_dialogue.pbtn_create_show_layer.clicked.connect(self.s_create_show_layer)
-        self.my_dialogue.qcbn_show_layer_back_reference_field.currentIndexChanged.connect(self.s_change_show_layer_back_reference_field)
+        self.rb_selection_rect.hide()
+        self.session_data.pol_mouse_down = None
+        self.dlg_refresh_feature_selection_section()
 
-        # Section "Styles"
-        self.my_dialogue.style_grb.toggled.connect(self.s_toggle_style_gb)
-        self.my_dialogue.qcb_pt_measure_icon_type.currentIndexChanged.connect(self.s_change_pt_measure_icon_type)
-        self.my_dialogue.qspb_pt_measure_icon_size.valueChanged.connect(self.s_change_pt_measure_icon_size)
-        self.my_dialogue.qspb_pt_measure_pen_width.valueChanged.connect(self.s_change_pt_measure_pen_width)
-        self.my_dialogue.qpb_pt_measure_color.color_changed.connect(self.s_change_pt_measure_color)
-        self.my_dialogue.qpb_pt_measure_fill_color.color_changed.connect(self.s_change_pt_measure_fill_color)
-        self.my_dialogue.qcb_pt_edit_icon_type.currentIndexChanged.connect(self.s_change_pt_edit_icon_type)
-        self.my_dialogue.qspb_pt_edit_icon_size.valueChanged.connect(self.s_change_pt_edit_icon_size)
-        self.my_dialogue.qspb_pt_edit_pen_width.valueChanged.connect(self.s_change_pt_edit_pen_width)
-        self.my_dialogue.qpb_pt_edit_color.color_changed.connect(self.s_change_pt_edit_color)
-        self.my_dialogue.qpb_pt_edit_fill_color.color_changed.connect(self.s_change_pt_edit_fill_color)
-        self.my_dialogue.qpb_ref_line_color.color_changed.connect(self.s_change_ref_line_color)
-        self.my_dialogue.qcb_ref_line_line_style.currentIndexChanged.connect(self.s_change_ref_line_line_style)
-        self.my_dialogue.qspb_ref_line_width.valueChanged.connect(self.s_change_ref_line_width)
+    def stm_move_feature(self, data_fid: int = None):
+        """set tool mode move_feature: re-stationing feature on assigned reference-line with immediate storage
+            :param data_fid: as parameter, else stored as property in cell-widget"""
+        # Rev. 2024-07-27
+        self.session_data.pol_mouse_move = None
 
-        # Section "Store/Restore Configuration":
-        self.my_dialogue.store_configurations_gb.toggled.connect(self.s_toggle_configurations_gb)
-        self.my_dialogue.pb_store_configuration.clicked.connect(self.s_store_configuration)
-        self.my_dialogue.pb_restore_configuration.clicked.connect(self.s_restore_configuration)
-        self.my_dialogue.pb_delete_configuration.clicked.connect(self.s_delete_configuration)
-        self.my_dialogue.lw_stored_settings.itemDoubleClicked.connect(self.s_restore_configuration)
+        if not data_fid and self.sender():
+            data_fid = self.sender().property('data_fid')
 
-        self.check_settings()
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs:
+            extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+            self.tool_select_feature(data_fid, ['sn', 'en', 'rfl'], ['sn'], extent_mode)
+            self.sys_set_tool_mode('move_feature')
+        else:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('data_layer_not_editable'))
 
-        self.iface.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.my_dialogue)
-        self.my_dialogue.setFloating(True)
+    def cpe_move_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas press for tool_mode 'move_feature'
+        :param event:"""
+        # Rev. 2024-07-27
+        self.session_data.pol_mouse_down = None
+        self.cvs_hide_snap()
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None:
+            pol_mouse_down = PoLFeature()
+            match = pol_mouse_down.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.edit_feature.ref_fid)
+            if match.isValid():
+                pol_mouse_down.data_fid = self.session_data.edit_feature.data_fid
+                self.session_data.edit_feature = pol_mouse_down
+                self.session_data.pol_mouse_down = pol_mouse_down
+                self.cvs_draw_feature(pol_mouse_down, ['sn'])
+                self.dlg_refresh_measurements(pol_mouse_down)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_match_on_reference_geom', self.session_data.edit_feature.ref_fid))
+
+    def cme_move_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas move for tool_mode 'move_feature'
+        :param event:"""
+        # Rev. 2024-07-27
+        event_with_left_btn = bool(QtCore.Qt.LeftButton & event.buttons())
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None:
+            pol_mouse_move = PoLFeature()
+            match = pol_mouse_move.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.edit_feature.ref_fid)
+            if match.isValid():
+                if event_with_left_btn and self.session_data.pol_mouse_down:
+                    pol_mouse_move.data_fid = self.session_data.edit_feature.data_fid
+                    self.session_data.edit_feature = pol_mouse_move
+                    self.cvs_draw_feature(pol_mouse_move, ['sn'])
+                    self.dlg_refresh_measurements(pol_mouse_move)
+                else:
+                    self.cvs_show_snap(match)
+            else:
+                self.cvs_hide_snap()
+
+    def cre_move_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas release for tool_mode 'move_feature'"""
+        # Rev. 2024-07-27
+        self.cvs_hide_snap()
+        self.cvs_hide_markers(['en'])
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None and self.session_data.pol_mouse_down is not None:
+            pol_mouse_up = PoLFeature()
+            match = pol_mouse_up.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.edit_feature.ref_fid)
+            if match.isValid():
+                pol_mouse_up.data_fid = self.session_data.edit_feature.data_fid
+                self.session_data.edit_feature = pol_mouse_up
+                self.dlg_refresh_measurements(pol_mouse_up)
+                self.tool_save_edit_feature(self.session_data.edit_feature)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_match_on_reference_geom', self.session_data.edit_feature.ref_fid))
+
+            self.session_data.pol_mouse_down = None
+            self.tool_select_feature(self.session_data.edit_feature.data_fid, ['sn', 'rfl'])
+            self.sys_set_tool_mode('pausing')
+
+    def stm_reposition_feature(self, data_fid: int = None):
+        """set tool mode reposition_feature: re-stationing feature on any reference-line with immediate storage
+            :param data_fid: as parameter, else stored as property in cell-widget"""
+        # Rev. 2024-07-27
+        self.session_data.pol_mouse_down = None
+
+        if not data_fid and self.sender():
+            data_fid = self.sender().property('data_fid')
+
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+        self.tool_select_feature(data_fid, ['sn', 'en', 'rfl'], ['sn'], extent_mode)
+
+        self.sys_set_tool_mode('reposition_feature')
+
+    def cpe_reposition_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas press for tool_mode 'reposition_feature'"""
+        # Rev. 2024-07-27
+
+        self.session_data.pol_mouse_down = None
+        self.cvs_hide_snap()
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None:
+            pol_mouse_down = PoLFeature()
+            # match without self.session_data.edit_feature.ref_fid => any feature
+            match = pol_mouse_down.snap_to_layer(event, self.derived_settings.refLyr)
+            if match.isValid():
+                pol_mouse_down.data_fid = self.session_data.edit_feature.data_fid
+                self.session_data.edit_feature = pol_mouse_down
+                self.session_data.pol_mouse_down = pol_mouse_down
+                self.cvs_draw_feature(pol_mouse_down, ['sn', 'rfl'])
+                self.dlg_refresh_measurements(pol_mouse_down)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_match_on_reference_layer'))
+
+    def cme_reposition_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas move for tool_mode 'reposition_feature'"""
+        # Rev. 2024-07-27
+        event_with_left_btn = bool(QtCore.Qt.LeftButton & event.buttons())
+        pol_mouse_move = PoLFeature()
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None:
+            match = pol_mouse_move.snap_to_layer(event, self.derived_settings.refLyr)
+            if match.isValid():
+                if event_with_left_btn and self.session_data.pol_mouse_down:
+                    pol_mouse_move.data_fid = self.session_data.edit_feature.data_fid
+                    self.session_data.edit_feature = pol_mouse_move
+                    self.cvs_draw_feature(self.session_data.edit_feature, ['sn', 'rfl'])
+                    self.dlg_refresh_measurements(pol_mouse_move)
+                else:
+                    self.cvs_draw_reference_geom(ref_fid=pol_mouse_move.ref_fid)
+                    self.cvs_show_snap(match)
+            else:
+                self.cvs_hide_snap()
+
+    def cre_reposition_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """ canvas release for tool_mode 'reposition_feature'"""
+        # Rev. 2024-07-27
+        self.cvs_hide_snap()
+        self.cvs_hide_markers(['en'])
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None and self.session_data.pol_mouse_down is not None:
+            pol_mouse_up = PoLFeature()
+            match = pol_mouse_up.snap_to_layer(event, self.derived_settings.refLyr)
+            if match.isValid():
+                pol_mouse_up.data_fid = self.session_data.edit_feature.data_fid
+                self.session_data.edit_feature = pol_mouse_up
+                self.dlg_refresh_measurements(pol_mouse_up)
+                self.tool_save_edit_feature(self.session_data.edit_feature)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_match_on_reference_layer'))
+
+            self.session_data.pol_mouse_down = None
+            self.tool_select_feature(self.session_data.edit_feature.data_fid, ['sn', 'rfl'])
+            self.sys_set_tool_mode('pausing')
+
+    def stm_move_po_pro_feature(self, data_fid: int = None):
+        """set tool mode move_po_pro_feature: re-stationing post-processing-feature on assigned reference-line with immediate storage
+            :param data_fid: as parameter, else stored as property in cell-widget"""
+        # Rev. 2024-07-28
+        self.session_data.pol_mouse_move = None
+        if not data_fid and self.sender():
+            data_fid = self.sender().property('data_fid')
+
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs:
+            extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+            self.tool_select_po_pro_feature(data_fid, ['sn', 'en', 'cn'], ['sn', 'cn'], extent_mode)
+            self.sys_set_tool_mode('move_po_pro_feature')
+        else:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('data_layer_not_editable'))
+
+    def cpe_move_po_pro_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """canvasPressEvent for tool-mode move_po_pro_feature
+        :param event:"""
+        # Rev. 2024-07-28
+        self.session_data.pol_mouse_down = None
+        self.cvs_hide_snap()
+
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.po_pro_feature is not None:
+            pol_mouse_down = PoLFeature()
+            match = pol_mouse_down.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.po_pro_feature.ref_fid)
+            if match.isValid():
+                pol_mouse_down.data_fid = self.session_data.po_pro_feature.data_fid
+                self.session_data.po_pro_feature = pol_mouse_down
+                self.session_data.pol_mouse_down = pol_mouse_down
+                self.cvs_draw_po_pro_feature(self.session_data.po_pro_feature, ['sn'])
+                self.dlg_refresh_measurements(pol_mouse_down)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_match_on_reference_geom', self.session_data.po_pro_feature.ref_fid))
+
+    def cme_move_po_pro_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """canvasMoveEvent for tool-mode move_po_pro_feature
+        :param event:"""
+        # Rev. 2024-07-28
+        event_with_left_btn = bool(QtCore.Qt.LeftButton & event.buttons())
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.po_pro_feature is not None:
+            pol_mouse_move = PoLFeature()
+            match = pol_mouse_move.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.po_pro_feature.ref_fid)
+            if match.isValid():
+                if event_with_left_btn and self.session_data.pol_mouse_down:
+                    pol_mouse_move.data_fid = self.session_data.po_pro_feature.data_fid
+                    self.session_data.po_pro_feature = pol_mouse_move
+                    self.cvs_draw_feature(pol_mouse_move, ['sn'])
+                    self.dlg_refresh_measurements(pol_mouse_move)
+                else:
+                    self.cvs_show_snap(match)
+            else:
+                self.cvs_hide_snap()
+
+    def cre_move_po_pro_feature(self, event: qgis.gui.QgsMapMouseEvent):
+        """canvasReleaseEvent for tool-mode move_po_pro_feature
+                        :param event:"""
+        # Rev. 2024-07-28
+        self.cvs_hide_snap()
+        self.cvs_hide_markers(['en'])
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.po_pro_feature is not None and self.session_data.pol_mouse_down is not None:
+            pol_mouse_up = PoLFeature()
+            match = pol_mouse_up.snap_to_layer(event, self.derived_settings.refLyr, self.session_data.po_pro_feature.ref_fid)
+            if match.isValid():
+                pol_mouse_up.data_fid = self.session_data.po_pro_feature.data_fid
+                self.session_data.po_pro_feature = pol_mouse_up
+                self.dlg_refresh_measurements(pol_mouse_up)
+                self.tool_save_edit_feature(self.session_data.po_pro_feature)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_match_on_reference_geom', self.session_data.po_pro_feature.ref_fid))
+
+        self.session_data.pol_mouse_down = None
+        self.cvs_draw_po_pro_feature(self.session_data.po_pro_feature, ['sn', 'cn'])
+        self.sys_set_tool_mode('pausing')
+
+    def cvs_hide_snap(self):
+        """hides self.snap_indicator by setting invalid match"""
+        # Rev. 2024-07-28
+        self.snap_indicator.setMatch(qgis.core.QgsPointLocator.Match())
+
+    def cvs_show_snap(self, match: qgis.core.QgsPointLocator.Match):
+        """shows self.snap_indicator"""
+        # Rev. 2024-07-28
+        self.snap_indicator.setMatch(match)
+
+    def tool_save_edit_feature(self, edit_feature: PoLFeature):
+        """save feature to data-layer
+        :param edit_feature: self.session_data.edit_feature/self.session_data.po_pro_feature"""
+        # Rev. 2024-07-28
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs:
+            if edit_feature.data_fid is not None:
+                data_feature, error_msg = self.tool_get_data_feature(data_fid=edit_feature.data_fid)
+
+                if data_feature:
+                    ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=edit_feature.ref_fid)
+                    if ref_feature:
+                        if ref_feature.hasGeometry():
+
+                            pol = edit_feature
+
+                            stationing = None
+
+                            if self.stored_settings.lrMode == 'Nabs':
+                                if pol and pol.is_valid:
+                                    stationing = pol.snap_n_abs
+                            elif self.stored_settings.lrMode == 'Nfract':
+                                if pol and pol.is_valid:
+                                    stationing = pol.snap_n_fract
+                            elif self.stored_settings.lrMode == 'Mabs':
+                                if pol and pol.is_valid:
+                                    stationing = pol.snap_m_abs
+                            else:
+                                raise NotImplementedError(f"lr_mode '{self.stored_settings.lrMode}' not implemented")
+
+                            if self.stored_settings.storagePrecision >= 0:
+                                if stationing is not None:
+                                    stationing = round(stationing, self.stored_settings.storagePrecision)
+
+                            data_feature[self.derived_settings.dataLyrReferenceField.name()] = ref_feature[self.derived_settings.refLyrIdField.name()]
+                            data_feature[self.derived_settings.dataLyrStationingField.name()] = stationing
+
+                            self.derived_settings.dataLyr.beginEditCommand('save_edit_feature')
+                            self.derived_settings.dataLyr.updateFeature(data_feature)
+                            self.derived_settings.dataLyr.endEditCommand()
+                        else:
+                            self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
+                    else:
+                        self.dlg_append_log_message('WARNING', error_msg)
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('data_fid_missing'))
+        else:
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('data_layer_not_editable'), True)
+
+    def s_project_layers_removed(self, removed_layer_ids: typing.Iterable[str]):
+        """triggered by qgis.core.QgsProject.instance().layersRemoved
+        check settings, refresh dialog
+        :param removed_layer_ids: List of removed layer-IDs, mostly only one
+        """
+        # Rev. 2024-07-28
+        re_init_dialog = False
+        affected_virtual_layer_ids = []
+
+        for layer_id in removed_layer_ids:
+            # detect orphaned virtual Show-Layer
+            for cl in qgis.core.QgsProject.instance().mapLayers().values():
+                if cl.isValid() and cl.dataProvider().name() == 'virtual' and layer_id in cl.dataProvider().uri().uri():
+                    affected_virtual_layer_ids.append(cl.id())
+
+            # check if it was a plugin-used layer
+            re_init_dialog |= layer_id in [self.stored_settings.refLyrId, self.stored_settings.dataLyrId, self.stored_settings.showLyrId]
+
+        self.sys_check_settings()
+        # allways refresh settings-section, f. e. the combo-boxes for layer- and field-selection
+        self.dlg_refresh_layer_settings_section()
+
+        if re_init_dialog:
+            self.session_data = SessionData()
+            self.cvs_hide_markers()
+            self.dlg_refresh_po_pro_section()
+            self.dlg_refresh_qcbn_reference_feature()
+            self.dlg_clear_measurements()
+            self.dlg_refresh_measure_section()
+            self.dlg_refresh_feature_selection_section()
+            self.dlg_apply_ref_lyr_crs()
+            self.dlg_append_log_message('INFO', MY_DICT.tr('plugin_used_layer_removed'))
+
+        # second run: delete orphaned virtual layers,
+        # double-check, if they weren't already deleted within removed_layer_ids
+        for affected_layer_id in affected_virtual_layer_ids:
+            # check 1
+            if affected_layer_id not in removed_layer_ids:
+                cl = qgis.core.QgsProject.instance().mapLayer(affected_layer_id)
+                # check 2
+                if cl:
+                    dialog_result = QtWidgets.QMessageBox.question(
+                        None,
+                        f"LinearReferencing ({get_debug_pos()})",
+                        MY_DICT.tr('delete_orphaned_virtual_layer', cl.name()),
+                        buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                        defaultButton=QtWidgets.QMessageBox.Yes
+                    )
+
+                    if dialog_result == QtWidgets.QMessageBox.Yes:
+                        # check 3: try/catch to avoid "RuntimeError: wrapped C/C++ object of type QgsVectorLayer has been deleted"
+                        # note: the layer-removal will trigger the current function again
+                        try:
+                            qgis.core.QgsProject.instance().removeMapLayer(cl.id())
+                        except Exception as e:
+                            pass
+
+    def s_project_layers_added(self, layers: typing.Iterable[qgis.core.QgsMapLayer]):
+        """triggered by qgis.core.QgsProject.instance().layersAdded
+        refresh GUI (settings/dialogs) of the MapTools if necessary
+        :param layers: list of layer-objects
+        """
+        # Rev. 2024-07-28
+
+        # Note: sys_check_settings will connect this layer as reference-layer, if there was none connected before
+        self.sys_check_settings()
+
+        # refresh settings, f.e. update the layer-selection-widgets
+        self.dlg_refresh_layer_settings_section()
+
+        for cl in layers:
+            if cl == self.derived_settings.refLyr:
+                # if no reference-layer so far it will be auto-connected by sys_check_settings
+                # => re-populate qlbl_selected_reference_layer and qcbn_reference_feature
+                self.dlg_refresh_qcbn_reference_feature()
+
+                # refresh measure-widgets (function-elements, line-edits, spinboxes...) if a reference-layer was auto-connected
+                self.dlg_refresh_measure_section()
+                self.dlg_apply_ref_lyr_crs()
+                self.dlg_append_log_message('INFO', MY_DICT.tr('reference_layer_auto_loaded', cl.name()))
+                break
+
+    def dlg_init(self):
+        """(re)initializes the dialog"""
+        # Rev. 2024-07-28
+        # default-size and position on first init:
+        flotate = True
         start_pos_x = int(self.iface.mainWindow().x() + 0.15 * self.iface.mainWindow().width())
         start_pos_y = int(self.iface.mainWindow().y() + 0.15 * self.iface.mainWindow().height())
-        self.my_dialogue.setGeometry(start_pos_x, start_pos_y, 530, 440)
+        start_width = 720
+        start_height = 460
+        initial_tab_index = 0
 
-    def s_move_start(self):
-        """moves point to start of reference-line"""
-        if self.cf.measure_completed:
-            ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                self.rs.current_measure = 0
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-    def s_move_down(self):
-        """moves point in direction start of reference-line"""
-        if self.cf.measure_completed:
-            delta = 1
-            if self.ds.refLyr.crs().isGeographic():
-                delta *= 1e-4
-
-            if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
-                delta *= 10
-            elif QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-                delta *= 100
-            elif QtWidgets.QApplication.keyboardModifiers() == (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier):
-                delta *= 1000
-
-            ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                self.rs.current_measure = max(0, self.rs.current_measure - delta)
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-    def s_move_up(self):
-        """moves point in direction start of reference-line"""
-        if self.cf.measure_completed:
-            delta = 1
-            if self.ds.refLyr.crs().isGeographic():
-                delta *= 1e-4
-
-            if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
-                delta *= 10
-            elif QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-                delta *= 100
-            elif QtWidgets.QApplication.keyboardModifiers() == (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier):
-                delta *= 1000
-
-            ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                self.rs.current_measure = min(ref_feature.geometry().length(), self.rs.current_measure + delta)
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-    def s_move_end(self):
-        """moves point to end of reference-line"""
-        if self.cf.measure_completed:
-            ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                self.rs.current_measure = ref_feature.geometry().length()
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-    def s_move_point(self, checked: bool):
-        """toggle tool-mode for change current measure interactive on canvas
-        :param checked: checked-status of checkable button for toggle
-        """
-        if self.cf.measure_completed:
-            if checked:
-                self.check_settings('before_move_point')
+        # if dialog already existed: store its size/position... to open the new one with same size/position...
+        if self.my_dialog:
+            if self.my_dialog.isFloating():
+                start_pos_x = self.my_dialog.x()
+                start_pos_y = self.my_dialog.y()
+                start_width = self.my_dialog.width()
+                start_height = self.my_dialog.height()
             else:
-                self.vm_pt_edit.hide()
-                self.check_settings('after_measure')
+                flotate = False
 
-            self.iface.mapCanvas().setMapTool(self)
-            self.dlg_refresh_measure_section()
-        else:
-            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No completed measure yet..."))
+            initial_tab_index = self.my_dialog.tbw_central.currentIndex()
+            # close *and* delete dialog
+            self.my_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+            self.my_dialog.close()
 
-    def s_toggle_configurations_gb(self, status):
-        """Toggle Group-Box in Dialog
-        :param status: isChecked()-State
-        """
-        # Rev. 2023-05-07
-        if status:
-            # 2147483647 ➜ max. possible value, else "OverflowError: argument 1 overflowed: value must be in the range -2147483648 to 2147483647"
-            self.my_dialogue.store_configurations_gb.setMaximumHeight(2147483647)
+        # the new one!
+        self.my_dialog = dialogs.PolDialog(self.iface)
+
+        # ...docked to QGis-Main-Window
+        self.iface.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.my_dialog)
+
+        # ...floating as before
+        self.my_dialog.setFloating(flotate)
+
+        if flotate:
+            # ...same size and position as floating before
+            self.my_dialog.setGeometry(start_pos_x, start_pos_y, start_width, start_height)
+
+        # ...same open tab as before
+        self.my_dialog.tbw_central.setCurrentIndex(initial_tab_index)
+
+        # some custom signals
+        self.my_dialog.dialog_close.connect(self.s_dialog_close)
+
+        # sometimes disturbing:
+        # reset toolmode if the dialog gets the focus
+        # therefore commented
+        # self.my_dialog.dialog_activated.connect(self.s_dialog_activated)
+
+        # signal/slot assignments for dialog-widgets
+        # Section "Stationing"
+        self.my_dialog.qcbn_reference_feature.currentIndexChanged.connect(self.s_select_current_ref_fid)
+        self.my_dialog.pb_open_ref_form.pressed.connect(self.s_open_ref_form)
+        self.my_dialog.pb_zoom_to_ref_feature.pressed.connect(self.s_zoom_to_ref_feature)
+
+        self.my_dialog.pb_toggle_n_abs_grp.pressed.connect(self.dlg_toggle_n_abs_grp)
+        self.my_dialog.pb_toggle_n_fract_grp.pressed.connect(self.dlg_toggle_n_fract_grp)
+        self.my_dialog.pb_toggle_m_abs_grp.pressed.connect(self.dlg_toggle_m_abs_grp)
+        self.my_dialog.pb_toggle_m_fract_grp.pressed.connect(self.dlg_toggle_m_fract_grp)
+        self.my_dialog.pb_toggle_z_grp.pressed.connect(self.dlg_toggle_z_grp)
+
+        self.my_dialog.dspbx_n_abs.valueChanged.connect(self.s_n_abs_edited)
+        self.my_dialog.dspbx_n_fract.valueChanged.connect(self.s_n_fract_edited)
+
+        self.my_dialog.dspbx_m_abs.valueChanged.connect(self.s_m_abs_edited)
+        self.my_dialog.dspbx_m_fract.valueChanged.connect(self.s_m_fract_edited)
+        self.my_dialog.tbtn_move_start.pressed.connect(self.s_move_to_start)
+        self.my_dialog.tbtn_move_down.pressed.connect(self.s_move_down)
+        self.my_dialog.tbtn_move_up.pressed.connect(self.s_move_up)
+        self.my_dialog.tbtn_move_end.pressed.connect(self.s_move_to_end)
+        self.my_dialog.pb_zoom_to_stationings.pressed.connect(self.s_zoom_to_stationings)
+        self.my_dialog.pbtn_resume_stationing.clicked.connect(self.stm_measure_stationing)
+        self.my_dialog.pbtn_insert_stationing.pressed.connect(self.s_insert_stationing)
+        self.my_dialog.pbtn_update_stationing.pressed.connect(self.s_update_stationing)
+        self.my_dialog.pb_move_stationing.clicked.connect(self.stm_move_stationing)
+
+        # Section "Feature-Selection":
+        self.my_dialog.pbtn_select_features.clicked.connect(self.stm_select_features)
+        self.my_dialog.pbtn_append_data_features.pressed.connect(self.s_append_data_features)
+        self.my_dialog.pbtn_append_show_features.pressed.connect(self.s_append_show_features)
+        self.my_dialog.pbtn_zoom_to_feature_selection.pressed.connect(self.s_zoom_to_feature_selection)
+        self.my_dialog.pbtn_clear_features.pressed.connect(self.s_clear_feature_selection)
+        self.my_dialog.pbtn_transfer_feature_selection.pressed.connect(self.s_transfer_feature_selection)
+        self.my_dialog.pbtn_feature_selection_to_data_layer_filter.pressed.connect(self.s_feature_selection_to_data_layer_filter)
+
+        self.my_dialog.qtrv_feature_selection.doubleClicked.connect(self.st_qtrv_feature_selection_double_click)
+        self.my_dialog.qtrv_feature_selection.selectionModel().selectionChanged.connect(self.st_qtrv_feature_selection_selection_changed)
+
+        # Section Post-Processing
+        self.my_dialog.pbtn_zoom_po_pro.pressed.connect(self.s_zoom_to_po_pro_selection)
+        self.my_dialog.pbtn_clear_po_pro.pressed.connect(self.s_clear_post_processing)
+        self.my_dialog.qtrv_po_pro_selection.doubleClicked.connect(self.st_qtrv_post_processing_double_click)
+        self.my_dialog.qtrv_po_pro_selection.selectionModel().selectionChanged.connect(self.st_qtrv_po_pro_selection_selection_changed)
+
+        # Section "Layers and Fields"
+        self.my_dialog.qcbn_reference_layer.currentIndexChanged.connect(self.ssc_reference_layer)
+        self.my_dialog.qcbn_ref_lyr_id_field.currentIndexChanged.connect(self.ssc_ref_lyr_id_field)
+        self.my_dialog.pb_open_ref_tbl.pressed.connect(self.s_open_ref_tbl)
+        self.my_dialog.pb_call_ref_disp_exp_dlg.pressed.connect(self.s_define_ref_lyr_display_expression)
+        self.my_dialog.qcbn_data_layer.currentIndexChanged.connect(self.ssc_data_layer)
+        self.my_dialog.pb_open_data_tbl.pressed.connect(self.s_open_data_tbl)
+        self.my_dialog.pb_open_data_tbl_2.pressed.connect(self.s_open_data_tbl)
+        self.my_dialog.pbtn_create_data_layer.pressed.connect(self.sys_create_data_layer)
+        self.my_dialog.pb_call_data_disp_exp_dlg.pressed.connect(self.s_define_data_lyr_display_expression)
+        self.my_dialog.qcbn_data_layer_id_field.currentIndexChanged.connect(self.ssc_data_layer_id_field)
+        self.my_dialog.qcbn_data_layer_reference_field.currentIndexChanged.connect(self.ssc_data_layer_reference_field)
+        self.my_dialog.qcbn_data_layer_stationing_field.currentIndexChanged.connect(self.ssc_data_layer_stationing_field)
+        self.my_dialog.qcb_lr_mode.currentIndexChanged.connect(self.scc_lr_mode)
+        self.my_dialog.qcb_storage_precision.currentIndexChanged.connect(self.scc_storage_precision)
+
+        self.my_dialog.qcbn_show_layer.currentIndexChanged.connect(self.ssc_show_layer)
+        self.my_dialog.pb_open_show_tbl.pressed.connect(self.s_open_show_tbl)
+        self.my_dialog.pb_open_show_tbl_2.pressed.connect(self.s_open_show_tbl)
+        self.my_dialog.pb_edit_show_layer_display_expression.pressed.connect(self.s_define_show_layer_display_expression)
+        self.my_dialog.pbtn_create_show_layer.pressed.connect(self.sys_create_show_layer)
+
+        self.my_dialog.qcbn_show_layer_back_reference_field.currentIndexChanged.connect(self.ssc_show_layer_back_reference_field)
+
+        # Section "Styles"
+        self.my_dialog.qcb_pt_sn_icon_type.currentIndexChanged.connect(self.scc_pt_sn_icon_type)
+        self.my_dialog.qspb_pt_sn_icon_size.valueChanged.connect(self.scc_pt_sn_icon_size)
+        self.my_dialog.qspb_pt_sn_pen_width.valueChanged.connect(self.scc_pt_sn_pen_width)
+        self.my_dialog.qpb_pt_sn_color.color_changed.connect(self.scc_pt_sn_color)
+        self.my_dialog.qpb_pt_sn_fill_color.color_changed.connect(self.scc_pt_sn_fill_color)
+
+        self.my_dialog.qpb_ref_line_color.color_changed.connect(self.scc_ref_line_color)
+        self.my_dialog.qcb_ref_line_style.currentIndexChanged.connect(self.scc_ref_line_style)
+        self.my_dialog.qspb_ref_line_width.valueChanged.connect(self.scc_ref_line_width)
+
+        self.my_dialog.pb_reset_style.pressed.connect(self.scc_reset_style)
+
+        self.my_dialog.pb_store_configuration.pressed.connect(self.s_store_configuration)
+        self.my_dialog.pb_delete_configuration.pressed.connect(self.s_delete_configuration)
+        self.my_dialog.pb_restore_configuration.pressed.connect(self.s_restore_configuration)
+
+        self.my_dialog.pbtn_clear_log_messages.pressed.connect(self.dlg_clear_log_messages)
+        self.my_dialog.pbtn_check_log_messages.pressed.connect(self.dlg_check_log_messages)
+
+        # some customizations on select-colors for QTableWidgets, default is blue and white-text, changed to yellow and black text
+        # must be defined here (not in PolDialog.py), presumably because the palette is altered to QGis-Application-Default if the dialog-window is opened
+        pal = self.my_dialog.qtrv_feature_selection.palette()
+        hightlight_brush = pal.brush(QtGui.QPalette.Highlight)
+        hightlight_brush.setColor(QtGui.QColor('#AAFFF09D'))
+        pal.setBrush(QtGui.QPalette.Highlight, hightlight_brush)
+        pal.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor('#000000'))
+        self.my_dialog.qtrv_feature_selection.setPalette(pal)
+
+        pal = self.my_dialog.qtrv_po_pro_selection.palette()
+        hightlight_brush = pal.brush(QtGui.QPalette.Highlight)
+        hightlight_brush.setColor(QtGui.QColor('#AAFFF09D'))
+        pal.setBrush(QtGui.QPalette.Highlight, hightlight_brush)
+        pal.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor('#000000'))
+        self.my_dialog.qtrv_po_pro_selection.setPalette(pal)
+
+        self.dlg_refresh_po_pro_section()
+        self.dlg_refresh_qcbn_reference_feature()
+        self.dlg_clear_measurements()
+        self.dlg_refresh_measure_section()
+        self.dlg_refresh_feature_selection_section()
+        self.dlg_refresh_style_settings_section()
+        self.dlg_refresh_layer_settings_section()
+        self.dlg_refresh_stored_settings_section()
+
+        self.dlg_apply_ref_lyr_crs()
+        self.dlg_apply_storage_precision()
+        self.dlg_apply_locale()
+        self.dlg_apply_canvas_crs()
+
+        self.my_dialog.status_bar.clearMessage()
+
+    def dlg_toggle_n_abs_grp(self):
+        """toggle visibility of dialog-part"""
+        # Rev. 2024-07-28
+        minus_icon = QtGui.QIcon(':icons/minus-box-outline.svg')
+        plus_icon = QtGui.QIcon(':icons/plus-box-outline.svg')
+
+        toggle_widgets = [
+            self.my_dialog.dspbx_n_abs,
+            self.my_dialog.qlbl_unit_n_abs,
+        ]
+
+        if self.my_dialog.dspbx_n_abs.isVisible():
+            self.my_dialog.pb_toggle_n_abs_grp.setIcon(plus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(False)
         else:
-            self.my_dialogue.store_configurations_gb.setMaximumHeight(20)
+            self.my_dialog.pb_toggle_n_abs_grp.setIcon(minus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(True)
+
+    def dlg_toggle_n_fract_grp(self):
+        """toggle visibility of dialog-part"""
+        # Rev. 2024-07-28
+        minus_icon = QtGui.QIcon(':icons/minus-box-outline.svg')
+        plus_icon = QtGui.QIcon(':icons/plus-box-outline.svg')
+
+        toggle_widgets = [
+            self.my_dialog.dspbx_n_fract,
+            self.my_dialog.qlbl_unit_n_fract,
+        ]
+
+        if self.my_dialog.dspbx_n_fract.isVisible():
+            self.my_dialog.pb_toggle_n_fract_grp.setIcon(plus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(False)
+        else:
+            self.my_dialog.pb_toggle_n_fract_grp.setIcon(minus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(True)
+
+    def dlg_toggle_m_abs_grp(self):
+        """toggle visibility of dialog-part"""
+        # Rev. 2024-07-28
+        minus_icon = QtGui.QIcon(':icons/minus-box-outline.svg')
+        plus_icon = QtGui.QIcon(':icons/plus-box-outline.svg')
+
+        toggle_widgets = [
+            self.my_dialog.dspbx_m_abs,
+            self.my_dialog.qlbl_unit_m_abs,
+            self.my_dialog.qlbl_m_abs_valid_hint
+        ]
+
+        if self.my_dialog.dspbx_m_abs.isVisible():
+            self.my_dialog.pb_toggle_m_abs_grp.setIcon(plus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(False)
+        else:
+            self.my_dialog.pb_toggle_m_abs_grp.setIcon(minus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(True)
+
+    def dlg_toggle_m_fract_grp(self):
+        """toggle visibility of dialog-part"""
+        # Rev. 2024-07-28
+        minus_icon = QtGui.QIcon(':icons/minus-box-outline.svg')
+        plus_icon = QtGui.QIcon(':icons/plus-box-outline.svg')
+
+        toggle_widgets = [
+            self.my_dialog.dspbx_m_fract,
+            self.my_dialog.qlbl_unit_m_fract,
+            self.my_dialog.qlbl_m_fract_valid_hint
+        ]
+
+        if self.my_dialog.dspbx_m_fract.isVisible():
+            self.my_dialog.pb_toggle_m_fract_grp.setIcon(plus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(False)
+        else:
+            self.my_dialog.pb_toggle_m_fract_grp.setIcon(minus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(True)
+
+    def dlg_toggle_z_grp(self):
+        """toggle visibility of dialog-part"""
+        # Rev. 2024-07-28
+        minus_icon = QtGui.QIcon(':icons/minus-box-outline.svg')
+        plus_icon = QtGui.QIcon(':icons/plus-box-outline.svg')
+
+        toggle_widgets = [
+            self.my_dialog.dnspbx_z,
+            self.my_dialog.qlbl_z_unit,
+        ]
+
+        if self.my_dialog.dnspbx_z.isVisible():
+            self.my_dialog.pb_toggle_z_grp.setIcon(plus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(False)
+        else:
+            self.my_dialog.pb_toggle_z_grp.setIcon(minus_icon)
+            for wdg in toggle_widgets:
+                wdg.setVisible(True)
+
+    def dlg_refresh_stored_settings_section(self):
+        """re-populates the list with the stored Configurations"""
+        # Rev. 2024-07-28
+        if self.my_dialog:
+            self.my_dialog.lw_stored_settings.clear()
+            for setting_idx in range(self._num_storable_settings):
+                setting_label_xpath = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
+                setting_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', setting_label_xpath)
+                # the label is used for display in QListWidget and as "primary key"
+                if setting_label and type_conversion_ok:
+                    qlwi = QtWidgets.QListWidgetItem()
+                    qlwi.setText(setting_label)
+                    qlwi.setData(self.configuration_label_role, setting_label)
+                    self.my_dialog.lw_stored_settings.addItem(qlwi)
 
     def s_restore_configuration(self):
         """restores stored configuration from project-file
         takes the selected Item from QListWidget
         uses its label, which serves as client-side unique identifier,
-        in qgis-project-file the storage is under XML-Path LinearReferencing/PolEvtStoredSettings/setting_{setting_idx} with setting_idx in range 0...9
+        in qgis-project-file the storage is under XML-Path LinearReferencing/PolEvtStoredSettings/setting_{setting_idx} with setting_idx in range 0...self._num_storable_settings
         """
-        # Rev. 2023-05-08
-
-        try_it = True
-        did_it = False
-        success_msg = ''
-        critical_msg = ''
-        info_msg = ''
-        warning_msg = ''
-
-        row_idx = self.my_dialogue.lw_stored_settings.currentRow()
+        # Rev. 2024-07-28
+        row_idx = self.my_dialog.lw_stored_settings.currentRow()
         if row_idx < 0:
-            try_it = False
-            info_msg = QtCore.QCoreApplication.translate('PolEvt', "please select an entry from the list above...")
+            self.dlg_append_log_message('INFO', MY_DICT.tr('select_config_from_list'))
+            return
         else:
-            selected_item = self.my_dialogue.lw_stored_settings.item(row_idx)
-            selected_label = selected_item.data(256)
+            selected_item = self.my_dialog.lw_stored_settings.item(row_idx)
+            selected_label = selected_item.data(self.configuration_label_role)
             for setting_idx in range(self._num_storable_settings):
-                key = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
-                setting_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', key)
+                setting_label_xpath = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
+                setting_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', setting_label_xpath)
                 if setting_label and type_conversion_ok:
                     if setting_label == selected_label:
-                        self.ss = self.StoredSettings()
-                        self.ds = self.DeferedSettings()
-                        property_list = [prop for prop in dir(self.StoredSettings) if prop.startswith('_') and not prop.startswith('__')]
+                        self.stored_settings = StoredSettings()
+                        property_list = [prop for prop in dir(StoredSettings) if prop.startswith('_') and not prop.startswith('__')]
 
                         for prop_name in property_list:
-                            key = f"/PolEvtStoredSettings/setting_{setting_idx}/{prop_name}"
-                            restored_value, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', key)
+                            prop_xpath = f"/PolEvtStoredSettings/setting_{setting_idx}/{prop_name}"
+                            restored_value, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', prop_xpath)
                             if restored_value and type_conversion_ok:
-                                setattr(self.ss, prop_name, restored_value)
+                                setattr(self.stored_settings, prop_name, restored_value)
 
-                        did_it = True
-                        success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Configuration {apos}{0}{apos} restored..."),setting_label)
+                        self.dlg_append_log_message('SUCCESS', MY_DICT.tr('config_restored', setting_label))
+                        self.gui_refresh()
                         break
-
-        if try_it and did_it:
-            self.refresh_gui()
-
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
-
-    def push_messages(self, success_msg: str = None, info_msg: str = None, warning_msg: str = None, critical_msg: str = None):
-        """pushes four kind of messages to messageBar
-        :param success_msg:
-        :param info_msg:
-        :param warning_msg:
-        :param critical_msg:
-        """
-        # Rev. 2023-05-23
-        debug_pos = gdp(2)
-        title = f"LinearReferencing ({debug_pos})"
-
-        # descending by duration
-
-        if critical_msg:
-            self.iface.messageBar().pushMessage(title, critical_msg, level=qgis.core.Qgis.Critical, duration=20)
-
-        if warning_msg:
-            self.iface.messageBar().pushMessage(title, warning_msg, level=qgis.core.Qgis.Warning, duration=10)
-
-        if info_msg:
-            self.iface.messageBar().pushMessage(title, info_msg, level=qgis.core.Qgis.Info, duration=5)
-
-        if success_msg:
-            self.iface.messageBar().pushMessage(title, success_msg, level=qgis.core.Qgis.Success, duration=3)
 
     def s_delete_configuration(self):
         """deletes stored configuration from project-file
@@ -672,89 +1772,79 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
         in qgis-project-file the storage is under XML-Path LinearReferencing/PolEvtStoredSettings/setting_{setting_idx} with setting_idx in range 0...9
         asks for confirmation
         """
-        # Rev. 2023-05-08
-
-        critical_msg = ''
-        success_msg = ''
-        info_msg = ''
-        warning_msg = ''
-
-        row_idx = self.my_dialogue.lw_stored_settings.currentRow()
+        # Rev. 2024-07-28
+        row_idx = self.my_dialog.lw_stored_settings.currentRow()
         if row_idx < 0:
-            info_msg = QtCore.QCoreApplication.translate('PolEvt', "please select an entry from the list above...")
+            self.dlg_append_log_message('INFO', MY_DICT.tr('select_config_from_list'))
         else:
-            selected_item = self.my_dialogue.lw_stored_settings.item(row_idx)
-
-            selected_label = selected_item.data(256)
+            selected_item = self.my_dialog.lw_stored_settings.item(row_idx)
+            # setting_label is used for display (Role 0) and additionally stored with a special role
+            selected_label = selected_item.data(self.configuration_label_role)
             for setting_idx in range(self._num_storable_settings):
                 # uses the label as unique identifier, although no "unique contraint" with this value possible in XML-Structure of project-file
-                key = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
-                setting_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', key)
+                setting_label_xpath = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
+                setting_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', setting_label_xpath)
                 if setting_label and type_conversion_ok:
                     if setting_label == selected_label:
                         dialog_result = QtWidgets.QMessageBox.question(
-                            self.my_dialogue,
-                            f"LinearReferencing ({gdp()})",
-                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "Delete configuration {apos}{0}{apos}?"),setting_label),
+                            None,
+                            f"LinearReferencing ({get_debug_pos()})",
+                            MY_DICT.tr('delete_config_dlg_txt', setting_label),
                             buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
                             defaultButton=QtWidgets.QMessageBox.Yes
                         )
 
                         if dialog_result == QtWidgets.QMessageBox.Yes:
-                            del_key = f"/PolEvtStoredSettings/setting_{setting_idx}"
-                            qgis.core.QgsProject.instance().removeEntry('LinearReferencing', del_key)
+                            setting_xpath = f"/PolEvtStoredSettings/setting_{setting_idx}"
+                            qgis.core.QgsProject.instance().removeEntry('LinearReferencing', setting_xpath)
                             self.dlg_refresh_stored_settings_section()
-                            success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Configuration {apos}{0}{apos} deleted..."),setting_label)
-                        else:
-                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
-
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
+                            self.dlg_append_log_message('SUCCESS', MY_DICT.tr('config_deleted', setting_label))
 
     def s_store_configuration(self):
         """stores the current configuration in project-file
         prompts user to enter a label, which serves as client-side unique identifier,
         in qgis-project-file the storage is under XML-Path LinearReferencing/PolEvtStoredSettings/setting_{setting_idx} with setting_idx in range 0...9
         asks for confirmation, if the label already exists"""
-        # Rev. 2023-05-08
-        try_it = True
-        critical_msg = ''
-        success_msg = ''
-        info_msg = ''
-        warning_msg = ''
-        row_idx = self.my_dialogue.lw_stored_settings.currentRow()
+        # Rev. 2024-07-28
+        row_idx = self.my_dialog.lw_stored_settings.currentRow()
         if row_idx < 0:
+            # nothing selected
             default_label = datetime.date.today().strftime('%Y-%m-%d')
         else:
             # convenience:  take selected ListItem for overwrite
-            selected_item = self.my_dialogue.lw_stored_settings.item(row_idx)
-            default_label = selected_item.data(256)
+            selected_item = self.my_dialog.lw_stored_settings.item(row_idx)
+            default_label = selected_item.data(self.configuration_label_role)
 
-        new_label, ok = QtWidgets.QInputDialog.getText(None, f"LinearReferencing ({gdp()})", QtCore.QCoreApplication.translate('PolEvt', "Label for configuration:"), QtWidgets.QLineEdit.Normal, default_label)
+        new_label, ok = QtWidgets.QInputDialog.getText(
+            None,
+            f"LinearReferencing ({get_debug_pos()})",
+            MY_DICT.tr('config_label_dlg_title'),
+            QtWidgets.QLineEdit.Normal,
+            default_label
+        )
         if not ok or not new_label:
-            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
+            pass
         else:
             new_idx = None
             not_used_idx = []
             for setting_idx in range(self._num_storable_settings):
-                key = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
-                old_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', key)
+                setting_label_xpath = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
+                old_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', setting_label_xpath)
 
                 if old_label and type_conversion_ok:
                     if old_label == new_label:
                         dialog_result = QtWidgets.QMessageBox.question(
                             None,
-                            f"LinearReferencing ({gdp()})",
-                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "Replace configuration {apos}{0}{apos}?"),new_label),
+                            f"LinearReferencing ({get_debug_pos()})",
+                            MY_DICT.tr('replace_config_dlg_txt', new_label),
                             buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
                             defaultButton=QtWidgets.QMessageBox.Yes
                         )
 
                         if dialog_result == QtWidgets.QMessageBox.Yes:
-                            try_it = True
                             new_idx = setting_idx
                         else:
-                            try_it = False
-                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
+                            return
                 else:
                     not_used_idx.append(setting_idx)
 
@@ -765,928 +1855,2272 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     new_idx = not_used_idx.pop(0)
                 else:
                     # or no store, if already _num_storable_settings configurations have been stored
-                    try_it = False
-                    critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "number of stored settings exceeds maximum ({0})..."),self._num_storable_settings)
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('too_many_stored_settings', self._num_storable_settings))
+                    return
 
-            if try_it:
-                property_dict = {prop: getattr(self.ss, prop) for prop in dir(self.StoredSettings) if prop.startswith('_') and not prop.startswith('__')}
+            property_dict = {prop: getattr(self.stored_settings, prop) for prop in dir(StoredSettings) if prop.startswith('_') and not prop.startswith('__')}
 
-                for prop_name in property_dict:
-                    prop_value = property_dict[prop_name]
-                    # other key then PolEvt
-                    key = f"/PolEvtStoredSettings/setting_{new_idx}/{prop_name}"
-                    qgis.core.QgsProject.instance().writeEntry('LinearReferencing', key, prop_value)
+            for prop_name in property_dict:
+                prop_value = property_dict[prop_name]
+                # other key then LolEvt
+                prop_xpath = f"/PolEvtStoredSettings/setting_{new_idx}/{prop_name}"
+                qgis.core.QgsProject.instance().writeEntry('LinearReferencing', prop_xpath, prop_value)
 
-                key = f"/PolEvtStoredSettings/setting_{new_idx}/setting_label"
-                qgis.core.QgsProject.instance().writeEntry('LinearReferencing', key, new_label)
+            setting_label_xpath = f"/PolEvtStoredSettings/setting_{new_idx}/setting_label"
+            qgis.core.QgsProject.instance().writeEntry('LinearReferencing', setting_label_xpath, new_label)
 
-                self.dlg_refresh_stored_settings_section()
-                success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Current configuration stored under {apos}{0}{apos}..."),new_label)
+            self.dlg_refresh_stored_settings_section()
+            self.dlg_append_log_message('SUCCESS', MY_DICT.tr('config_stored', new_label))
 
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
+    @QtCore.pyqtSlot(str, str, dict)
+    def sys_layer_slot(self, layer_id: str, conn_signal: str, **kwargs):
+        """one function for many purposes
+        Standard vector-layer-signals usually provide little information to connected slots
+          sys_connect_layer_slot uses sys_layer_slot in a lambda-function, which adds additional informations.
+          This standard-connect-method executes actions dependend on the emitting layer, the emitting signal and the standard-signal-parameters (kwargs)
+         :param layer_id: ID of the layer, whose signal is connected, this ID is checked to identify the layer and his role within the plugin
+         :param conn_signal: which signal is emitted
+         :param kwargs: any number of key/value, dependend on the connected signal, see https://api.qgis.org/api/classQgsVectorLayer.html
+         """
+        # Rev. 2024-07-28
+        layer = qgis.core.QgsProject.instance().mapLayer(layer_id)
+        if layer:
+            # Question 1: Which of the currently plugin-used layer (refLyr, dataLyr, showLyr) has emitted the signal?
+            # Question 2: What signal was emitted? Dependend on signal different informations are passed through as "kwargs"
+            # The further procedure depends on layer-function within this plugin and the triggered conn_signal.
+            if layer == self.derived_settings.refLyr:
+                if conn_signal == 'subsetStringChanged':
+                    # filter altered or cleared
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_qcbn_reference_feature()
+                    self.dlg_refresh_po_pro_section()
+                elif conn_signal == 'displayExpressionChanged':
+                    # changed display-expression
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_qcbn_reference_feature()
+                    self.dlg_refresh_po_pro_section()
+                elif conn_signal == 'editingStarted':
+                    # start new PostProcessing-Session
+                    # reset previously cached reference-features
+                    if self.session_data.po_pro_reference_cache or self.session_data.po_pro_data_cache:
+                        self.dlg_append_log_message('INFO', MY_DICT.tr('reset_po_pro_cache'))
 
-    def s_toggle_style_gb(self, status):
-        """Toggle Group-Box in Dialog
-        :param status: isChecked()-State
+                    self.session_data.po_pro_reference_cache = {}
+                    self.session_data.po_pro_data_cache = {}
+                    self.dlg_refresh_po_pro_section()
+                    self.cvs_hide_markers(['cn', 'crfl', 'cuca', 'cacu'])
+                elif conn_signal == 'afterCommitChanges':
+                    # edits in reference-layer committed
+                    self.sys_refresh_po_pro_data_cache()
+                    self.dlg_refresh_po_pro_section()
+                    if len(self.session_data.po_pro_data_cache):
+                        # data-features with changed positions after reference-geometry-edit
+                        self.dlg_refresh_feature_selection_section()
+                        self.my_dialog.show()
+                        self.my_dialog.activateWindow()
+                        self.my_dialog.tbw_central.setCurrentIndex(2)
+                elif conn_signal == 'editCommandEnded':
+                    # reference-feature possibly modified (update/insert/delete), not yet committed
+                    self.dlg_refresh_po_pro_section()
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_qcbn_reference_feature()
+                elif conn_signal == 'editingStopped':
+                    # possibly modified (update/insert/delete) reference-feature, committed or rollbacked
+                    self.dlg_refresh_po_pro_section()
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_qcbn_reference_feature()
+                elif conn_signal == 'geometryChanged':
+                    # geometry-change of reference-layer on QGis-side, not provider
+                    # triggered for each altered geometry and any kind of geometry-change (vertex-M/Z-value, new vertex, vertex moved, vertex deleted, geometry split with multi-type-layer...)
+                    # the original shape (without not yet committed edits) inserted into self.session_data.po_pro_reference_cache
+                    # the collected features in po_pro_reference_cache will be evaluated via sys_refresh_po_pro_data_cache after refLyr-conn_signal == 'afterCommitChanges'
+                    fid = kwargs['fid']
+                    current_geom = kwargs['geometry']
+
+                    self.sys_refresh_po_pro_reference_cache(fid, current_geom)
+
+
+                elif conn_signal == 'crsChanged':
+                    self.sys_check_settings()
+                    self.dlg_apply_ref_lyr_crs()
+
+                else:
+                    raise NotImplementedError(f"conn_signal '{conn_signal}' on Layer '{layer_id}' not implemented")
+
+            elif layer == self.derived_settings.dataLyr:
+                if conn_signal == 'displayExpressionChanged':
+                    # data-layers displayExpression has changed => refresh some parts of the dialog
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+                elif conn_signal == 'attributeValueChanged':
+                    """triggered on change of any attribute-value in edit-buffer:
+                        changes in data-layer-attribute-form
+                            single form: if the form is closed with Save, triggered once for each altered attribute
+                            table with form-view (splitted, left feature-list, right form): on every key-stroke
+                        changes in attribute-table (on focus-loose after editing (switching to other row or cell), on enter-key-stroke)
+                        interactive edits of stationings by this plugin 
+                        caution: *triggered once for each altered attribute*
+                        usage here:
+                        prevent edits of the self.derived_settings.dataLyrIdField (normally an autoincrement-integer, also used as fid)
+                        its value *must never be changed* (else error on commit)
+                        (see sys_create_data_layer, where the attribut-form for this field is set to readOnly for additional protection)
+                        append edited fid to selected_fids
+                        see lsl_data_layer_edit_command_ended for dialog-canvas-refresh
+                    """
+                    # signal emitted with three parameters: fid, idx (attribute index of the changed attribute) and (changed!) value
+                    fid = kwargs['fid']
+                    idx = kwargs['idx']
+                    # value = kwargs['value']
+
+                    # Check, if the user tried to change the fid
+                    pk_field_idzs = self.derived_settings.dataLyr.dataProvider().pkAttributeIndexes()
+                    # in QGis the fid is allways an integer and the one and only primary key
+                    if idx in pk_field_idzs:
+                        data_feature, error_msg = self.tool_get_data_feature(data_fid=fid)
+
+                        if data_feature:
+
+                            feature_request = qgis.core.QgsFeatureRequest(fid)
+                            request_result = self.derived_settings.dataLyr.dataProvider().getFeatures(feature_request)
+                            feature_list = list(request_result)
+                            if feature_list:
+                                provider_data_feature = feature_list[0]
+                                for idx in pk_field_idzs:
+                                    data_feature.setAttribute(idx, provider_data_feature[idx])
+                                self.derived_settings.dataLyr.updateFeature(data_feature)
+                                self.dlg_append_log_message('WARNING', MY_DICT.tr('update_changed_feature_id_not_allowed'))
+
+                    if fid not in self.session_data.selected_fids:
+                        self.session_data.selected_fids.append(fid)
+
+                elif conn_signal == 'editCommandStarted':
+                    # Signal emitted when a new edit command has been started.
+                    # no further action here, just for interest and completeness...
+                    # text = kwargs['text']
+                    pass
+                elif conn_signal == 'editCommandEnded':
+                    """ triggered on endEditCommand
+                    requires transaction surrounded by beginEditCommand() rsp. endEditCommand()
+                    Note: 
+                    all QGis-standard-updates/inserts/deletes from feature-forms or -tables use "beginEditCommand/endEditCommand" and will trigger this event, 
+                    in tables after each altered cell (!) 
+                    in forms on submit
+                    no access to altered data, therefore use attributeValueChanged
+                    """
+                    # self.cvs_hide_markers()
+
+                    if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+                        self.dlg_refresh_feature_selection_section()
+                        self.dlg_refresh_po_pro_section()
+
+                    if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+                        self.derived_settings.showLyr.updateExtents()
+                        self.derived_settings.showLyr.triggerRepaint()
+
+                    # refresh canvas-graphics, if the feature still exists ('editCommandEnded' could be triggered by delete)
+                    if self.session_data.edit_feature:
+                        data_feature, error_msg = self.tool_get_data_feature(data_fid=self.session_data.edit_feature.data_fid)
+                        if data_feature:
+                            self.tool_select_feature(self.session_data.edit_feature.data_fid, ['sn', 'rfl'])
+
+
+
+
+                elif conn_signal == 'featureAdded':
+                    """emitted when a feature has been added to data-layer, committed and not committed
+                    Note:
+                        new feature has negative fid, on insert triggered once (afterward editCommandEnded)
+                        setting table not editable and/or save edits will trigger three kind of slots:
+                        committedFeaturesAdded (once for all features => inser provider with positive fid)
+                        featureAdded (once for every feature => insert in QGis with positive fid)
+                        featuresDeleted (once for all features => delete in QGis the features with negative fid)
+                    """
+
+                    fid = kwargs['fid']
+                    # select the new feature
+                    self.tool_select_feature(fid, ['sn', 'rfl'])
+
+                elif conn_signal == 'editingStarted':
+                    # Emitted when editing-session on this layer has started.
+                    # set system_vs (instead of sys_check_settings) to enable some edit-buttons
+
+                    self.system_vs |= self.SVS.DATA_LAYER_EDITABLE
+                    self.dlg_refresh_measure_section()
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+
+                elif conn_signal == 'editingStopped':
+                    # Emitted when editing-session on this layer has ended.
+                    # set system_vs (instead of sys_check_settings) to disable some edit-buttons
+
+                    self.system_vs &= ~self.SVS.DATA_LAYER_EDITABLE
+                    self.dlg_refresh_measure_section()
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+                    # detect and reflect changes of table-structure, new fields, deleted fields...
+                    self.dlg_refresh_layer_settings_section()
+
+                elif conn_signal == 'subsetStringChanged':
+                    # filter query edited or cleared
+                    # layer can not be in edit-mode, so reload without danger of loosing uncommitted features
+                    # self.derived_settings.dataLyr.dataProvider().reloadData()
+                    # self.derived_settings.dataLyr.reload()
+
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+                    # reload showLayer and get correct updated extents:
+                    if self.derived_settings.showLyr is not None:
+                        tools.MyTools.set_layer_extent(self.derived_settings.showLyr)
+                        self.derived_settings.showLyr.triggerRepaint()
+                        self.iface.mapCanvas().refresh()
+
+                elif conn_signal == 'committedFeaturesAdded':
+                    # Emitted when features are added to the provider after save of the edit-session
+                    # not committed, if addFeature() is directly applied to dataProvider without transaction/edit-buffer
+                    # two parameters: layerId and addedFeatures (C: QgsFeatureList Python: list of QgsFeature)
+                    # previously uncommitted features with negative fids in QGis will get positive fid, usually the autoincremented integer providerside id-column
+                    # the fids will be appended to self.session_data.selected_fids, so that these new features will be displayed in feature-selection
+                    # possibly superfluous, because each feature in committedFeaturesAdded has already been handled by featureAdded
+
+                    # layerId = kwargs['layerId']
+                    # addedFeatures = kwargs['addedFeatures']
+
+                    self.dlg_refresh_feature_selection_section()
+
+                elif conn_signal == 'featuresDeleted':
+                    # Emitted when features were deleted on layer or its edit-buffer before commit
+                    # one parameter: fids => fids of deleted features
+                    # note:
+                    # before commit all new features have a negative fid
+                    # on commit these temporary features get deleted and new ones with positive fids were inserted
+                    # see committedFeaturesRemoved
+                    # see editCcommandEnded for dialog-canvas-refresh
+                    fids = kwargs['fids']
+
+                    for data_fid in fids:
+                        if data_fid in self.session_data.selected_fids:
+                            self.session_data.selected_fids.remove(data_fid)
+                        self.session_data.po_pro_data_cache.pop(data_fid, None)
+
+                        if self.session_data.edit_feature and data_fid == self.session_data.edit_feature.data_fid:
+                            self.session_data.edit_feature = None
+                            self.cvs_hide_markers()
+
+                        if self.session_data.po_pro_feature and data_fid == self.session_data.po_pro_feature.data_fid:
+                            self.session_data.po_pro_feature = None
+                            self.cvs_hide_markers()
+
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+
+                elif conn_signal == 'committedAttributeValuesChanges':
+                    # Emitted when attribute value changes are saved to the provider if not in transaction mode.
+                    # two parameters:
+                    # layerId
+                    # changedAttributesValues (QgsChangedAttributesMap, dictionary with fid as key)
+                    # layerId = kwargs['layerId']
+                    # changedAttributesValues = kwargs['changedAttributesValues']
+
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+                elif conn_signal == 'afterCommitChanges':
+                    # Emitted after changes are committed to the data provider.
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+                elif conn_signal == 'committedFeaturesRemoved':
+                    # Emitted when features are deleted from the provider if not in transaction mode.
+                    # two parameters:
+                    # layerId
+                    # deletedFeatureIds (list of ids)
+                    # layerId = kwargs['layerId']
+                    # deletedFeatureIds = kwargs['deletedFeatureIds']
+                    self.cvs_hide_markers()
+                    self.dlg_refresh_feature_selection_section()
+                    self.dlg_refresh_po_pro_section()
+                else:
+                    raise NotImplementedError(f"conn_signal '{conn_signal}' on Layer '{layer_id}' not implemented")
+
+            elif layer == self.derived_settings.showLyr:
+                if conn_signal == 'displayExpressionChanged':
+                    # layers displayExpression has changed => refresh some parts of the dialog
+                    self.dlg_refresh_feature_selection_section()
+                elif conn_signal == 'subsetStringChanged':
+                    # layers filter has changed => refresh some parts of the dialog
+                    self.dlg_refresh_feature_selection_section()
+                elif conn_signal == 'dataSourceChanged':
+                    # print("showLyr dataSourceChanged")
+                    self.dlg_refresh_feature_selection_section()
+                else:
+                    raise NotImplementedError(f"conn_signal '{conn_signal}' on Layer '{layer_id}' not implemented")
+
+            else:
+                # disconnect orphaned connection-object for previously used plugin-layer
+                if layer_id in self.signal_slot_cons:
+                    for conn_signal in self.signal_slot_cons[layer_id]:
+                        for conn_function in self.signal_slot_cons[layer_id][conn_signal]:
+                            conn_id = self.signal_slot_cons[layer_id][conn_signal][conn_function]
+                            layer.disconnect(conn_id)
+
+                    del self.signal_slot_cons[layer_id]
+
+    def dlg_apply_ref_lyr_crs(self):
+        """applies the reference-layer-projection to coordinate-display in dialog
+        affects some QLabel-widgets which show the current unit,
+        num decimals of some measurement-widgets and delegates
+        step-width of some measurement-spinboxes
         """
-        # Rev. 2023-05-03
-        if status:
-            self.my_dialogue.style_grb.setMaximumHeight(2147483647)
+        # Rev. 2024-07-28
+        if self.my_dialog and self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+
+            unit, zoom_pan_tolerance, display_precision, measure_default_step = tools.MyTools.eval_crs_units(self.derived_settings.refLyr.crs().authid())
+
+            for unit_widget in self.my_dialog.layer_unit_widgets:
+                unit_widget.setText(f"[{unit}]")
+
+            # set default-step-width for spinbox-click
+            # note: some spinboxes with class QDoubleNoSpinBox have no spin-buttons and don't need to be adjusted
+            default_step_apply_widgets = [
+                self.my_dialog.dspbx_n_abs,
+                self.my_dialog.dspbx_m_abs
+            ]
+            for dspbx in default_step_apply_widgets:
+                with QtCore.QSignalBlocker(dspbx):
+                    dspbx.default_step = measure_default_step
+
+            # fract-spinboxes excluded, whose step-width and precision is layer-projection independend
+            # M-Z-spinboxes pragmatically included, although their range could be totaly independend from layer-projection
+
+            precision_apply_widgets = [
+                self.my_dialog.dnspbx_snap_x,
+                self.my_dialog.dnspbx_snap_y,
+                self.my_dialog.dnspbx_z,
+                self.my_dialog.dspbx_n_abs,
+                self.my_dialog.dspbx_m_abs
+            ]
+
+            for dspbx in precision_apply_widgets:
+                with QtCore.QSignalBlocker(dspbx):
+                    dspbx.setDecimals(display_precision)
+
+            # numerical values inside QTableWidget or QComboBox
+            delegates = [
+                self.my_dialog.ref_length_delegate,
+            ]
+            for delegate in delegates:
+                delegate.precision = display_precision
+
+            self.my_dialog.update()
+
+    def dlg_apply_storage_precision(self):
+        """stationig-delegates, precision depends on LR-Mode and is not predictable for Mabs because of the M-range
+        therfore the storagePrecision is used
+        """
+        # Rev. 2024-09-23
+        if self.my_dialog:
+            if self.stored_settings.storagePrecision >= 0:
+                storage_precision = self.stored_settings.storagePrecision
+            else:
+                # -1 => no limit
+                storage_precision = 5
+
+            stationing_delegates = [
+                self.my_dialog.cdlg_1,
+                self.my_dialog.cdlg_2,
+                self.my_dialog.cdlg_po_pro_1,
+                self.my_dialog.cdlg_po_pro_2,
+                self.my_dialog.first_m_delegate,
+                self.my_dialog.last_m_delegate
+            ]
+
+            for delegate in stationing_delegates:
+                delegate.precision = storage_precision
+
+            self.my_dialog.update()
+
+    def dlg_apply_canvas_crs(self):
+        """applies the canvas-projection to coordinate-display in dialog
+        affects some QLabel-widgets which show the current unit and num decimals of some measurement-widgets
+        """
+        # Rev. 2024-07-28
+        if self.my_dialog:
+            unit, zoom_pan_tolerance, display_precision, measure_default_step = tools.MyTools.eval_crs_units(self.iface.mapCanvas().mapSettings().destinationCrs().authid())
+
+            for unit_widget in self.my_dialog.canvas_unit_widgets:
+                unit_widget.setText(f"[{unit}]")
+
+            precision_apply_widgets = [
+                self.my_dialog.dnspbx_canvas_x,
+                self.my_dialog.dnspbx_canvas_y
+            ]
+            for qdble in precision_apply_widgets:
+                with QtCore.QSignalBlocker(qdble):
+                    qdble.setDecimals(display_precision)
+
+            self.my_dialog.update()
+
+    def dlg_apply_locale(self):
+        """applies the QGis-Locale-Settings (number-format, group-seperator) in dialog-widgets and -delegates """
+        # Rev. 2024-07-28
+        if self.my_dialog:
+            if QtCore.QSettings().value('locale/overrideFlag', type=bool):
+                # => lcid in QGis differing from system-settings
+                # default: 'en_US' (if overrideFlag is set but no userLocale defined)
+                # globalLocale => QGis-Options-Dialog "Locale (numbers, date and currency formats)"
+                lcid = QtCore.QSettings().value('locale/globalLocale', 'en_US')
+            else:
+                # take the system-lcid
+                lcid = QtCore.QLocale.system().name()
+
+            show_group_separator = QtCore.QSettings().value('locale/showGroupSeparator', True)
+
+            # caveat: this value is read from QGIS.ini, therefore the returned value can be a non-boolean as f.e. 'false'
+            show_group_separator = show_group_separator in [True, 'True', 'true', '1', 1]
+
+            q_locale = QtCore.QLocale(lcid)
+
+            if not show_group_separator:
+                q_locale.setNumberOptions(q_locale.numberOptions() | QtCore.QLocale.OmitGroupSeparator)
+            else:
+                q_locale.setNumberOptions(q_locale.numberOptions() | ~QtCore.QLocale.OmitGroupSeparator)
+
+            # sadly no locale-cascading for the embedded widgets...
+            self.my_dialog.setLocale(q_locale)
+
+            # ...thus:
+            delegates = [
+                self.my_dialog.cdlg_2,
+                # self.cdlg_5,
+                self.my_dialog.cdlg_po_pro_2,
+                self.my_dialog.ref_length_delegate,
+                self.my_dialog.first_m_delegate,
+                self.my_dialog.last_m_delegate
+            ]
+            for delegate in delegates:
+                delegate.set_q_locale(q_locale)
+
+            locale_apply_widgets = [
+                self.my_dialog.dnspbx_canvas_x,
+                self.my_dialog.dnspbx_canvas_y,
+                self.my_dialog.dnspbx_snap_x,
+                self.my_dialog.dnspbx_snap_y,
+                self.my_dialog.dnspbx_z,
+                self.my_dialog.dspbx_n_abs,
+                self.my_dialog.dspbx_n_fract,
+                self.my_dialog.dspbx_m_fract,
+                self.my_dialog.dspbx_m_abs,
+            ]
+            for widget in locale_apply_widgets:
+                widget.set_q_locale(q_locale)
+
+            self.my_dialog.update()
+
+    def tool_check_selected_ids(self):
+        """checks and recreates self.session_data.selected_fids"""
+        # Rev. 2024-07-28
+        checked_fids = []
+
+        if self.SVS.DATA_LAYER_EXISTS in self.system_vs:
+            # remove non-integers as f. e. 'automatically created' for uncommitted features
+            selected_fids = [_id for _id in self.session_data.selected_fids if isinstance(_id, int)]
+            # make unique
+            selected_fids = list(dict.fromkeys(selected_fids))
+            # check existance in data-layer
+            for data_fid in selected_fids:
+                data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+                if data_feature:
+                    checked_fids.append(data_fid)
+
+            # sort ascending
+            checked_fids.sort()
+
+        self.session_data.selected_fids = checked_fids
+
+    def tool_check_po_pro_data_cache(self):
+        """checks self.session_data.po_pro_data_cache:
+        data_feature existing?
+        reference-feature existing?
+        cached reference-feature existing?
+        same reference-feature for current and cached?
+        Failures are removed from cache with log_message
+        """
+        # Rev. 2024-07-28
+
+        # avoid "RuntimeError: dictionary changed size during iteration"
+        checked_po_pro_data_cache = {}
+
+        # 'dict_keys' object has no attribute 'sort'
+        po_pro_fids = list(self.session_data.po_pro_data_cache.keys())
+
+        # sort ascending
+        po_pro_fids.sort()
+
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            for data_fid in po_pro_fids:
+                po_pro_cached_feature = self.session_data.po_pro_data_cache[data_fid]
+                # check existance in data-layer
+                data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+                if data_feature:
+                    # check reference-feature
+                    ref_id = data_feature[self.derived_settings.dataLyrReferenceField.name()]
+                    ref_feature, error_msg = self.tool_get_reference_feature(data_fid=data_fid)
+                    if ref_feature:
+                        if po_pro_cached_feature.ref_fid in self.session_data.po_pro_reference_cache:
+                            # check cached reference feature
+                            if ref_feature.id() == po_pro_cached_feature.ref_fid:
+                                if po_pro_cached_feature.is_valid:
+                                    checked_po_pro_data_cache[data_fid] = self.session_data.po_pro_data_cache[data_fid]
+                                else:
+                                    self.dlg_append_log_message('WARNING', MY_DICT.tr('po_pro_cached_feature_not_valid', data_fid))
+                            else:
+                                self.dlg_append_log_message('WARNING', MY_DICT.tr('po_pro_referenced_features_not_equal', po_pro_cached_feature.ref_fid))
+                        else:
+                            self.dlg_append_log_message('WARNING', MY_DICT.tr('po_pro_cached_reference_feature_missing_or_invalid', po_pro_cached_feature.ref_fid))
+                    else:
+                        self.dlg_append_log_message('WARNING', error_msg)
+                else:
+                    # self.dlg_append_log_message('WARNING', error_msg)
+                    # data-feature not found, either deleted or filtered
+                    pass
+
+        self.session_data.po_pro_data_cache = checked_po_pro_data_cache
+
+    def tool_get_reference_geom(self, reference_geom: qgis.core.QgsGeometry = None, ref_feature: qgis.core.QgsFeature = None, ref_fid: int = None, ref_id: int | str = None, data_fid: int = None) -> tuple:
+        """get geometry by multiple ways
+        :param reference_geom: geometry itself as parameter (makes this function universal)
+        :param ref_feature: get geometry from Feature
+        :param ref_fid: query geometry with QGis-fid
+        :param ref_id: query geometry with registered self.derived_settings.refLyrIdField
+        :param data_fid: query geometry with fid of data-feature
+        :returns: tuple(qgis.core.QgsGeometry,error_msg)
+        """
+        # Rev. 2024-07-28
+        error_msg = None
+        if reference_geom and isinstance(reference_geom, qgis.core.QgsGeometry):
+            pass
         else:
-            self.my_dialogue.style_grb.setMaximumHeight(20)
+            ref_feature, error_msg = self.tool_get_reference_feature(ref_feature, ref_fid, ref_id, data_fid)
+            if ref_feature:
+                if ref_feature.hasGeometry():
+                    reference_geom = ref_feature.geometry()
+                else:
+                    error_msg = MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id())
 
-    def s_toggle_layers_and_fields_grb(self, status):
-        """Toggle Group-Box in Dialog
-        :param status: isChecked()-State
-        """
-        # Rev. 2023-05-03
-        if status:
-            self.my_dialogue.layers_and_fields_grb.setMaximumHeight(2147483647)
+        return reference_geom, error_msg
+
+    def s_move_to_start(self):
+        """moves current measured segment to stationing == 0 => start of reference-line"""
+        # Rev. 2024-07-28
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+                self.session_data.measure_feature.recalc_by_stationing(0, 'Nabs')
+                if self.session_data.measure_feature.is_valid:
+                    self.cvs_draw_feature(self.session_data.measure_feature, draw_markers=['sn', 'rfl'])
+                    self.dlg_refresh_measurements(self.session_data.measure_feature)
+                else:
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_measurement'))
+
+    def s_move_down(self):
+        """moves point in direction start of reference-line, stationings getting smaller"""
+        # Rev. 2024-07-28
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+                reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=self.session_data.measure_feature.ref_fid)
+                if reference_geom:
+                    # step-width dependend on refLyr-crs and keyboard-modifiers
+                    unit, zoom_pan_tolerance, display_precision, measure_default_step = tools.MyTools.eval_crs_units(self.derived_settings.refLyr.crs().authid())
+                    delta = measure_default_step
+                    if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
+                        delta *= 10
+                    elif QtCore.Qt.ShiftModifier == QtWidgets.QApplication.keyboardModifiers():
+                        delta *= 100
+                    elif QtWidgets.QApplication.keyboardModifiers() == (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier):
+                        delta *= 1000
+
+                    old_stationing = self.session_data.measure_feature.snap_n_abs
+
+                    new_stationing = old_stationing - delta
+
+                    if new_stationing < 0:
+                        new_stationing = 0
+
+                    self.session_data.measure_feature.recalc_by_stationing(new_stationing, 'Nabs')
+                    if self.session_data.measure_feature.is_valid:
+                        self.cvs_draw_feature(self.session_data.measure_feature, draw_markers=['sn', 'rfl'])
+                        self.dlg_refresh_measurements(self.session_data.measure_feature)
+                    else:
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_measurement'))
+
+    def s_move_up(self):
+        """moves point in direction end of reference-line, stationings getting larger"""
+        # Rev. 2024-07-28
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+                reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=self.session_data.measure_feature.ref_fid)
+                if reference_geom:
+                    ref_len = reference_geom.length()
+                    unit, zoom_pan_tolerance, display_precision, measure_default_step = tools.MyTools.eval_crs_units(self.derived_settings.refLyr.crs().authid())
+                    # step-width dependend on refLyr-crs and keyboard-modifiers
+                    delta = measure_default_step
+                    if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
+                        delta *= 10
+                    elif QtCore.Qt.ShiftModifier == QtWidgets.QApplication.keyboardModifiers():
+                        delta *= 100
+                    elif QtWidgets.QApplication.keyboardModifiers() == (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier):
+                        delta *= 1000
+
+                    old_stationing = self.session_data.measure_feature.snap_n_abs
+
+                    new_stationing = old_stationing + delta
+
+                    if new_stationing > ref_len:
+                        new_stationing = ref_len
+
+                    if new_stationing < 0:
+                        new_stationing = 0
+
+                    self.session_data.measure_feature.recalc_by_stationing(new_stationing, 'Nabs')
+                    if self.session_data.measure_feature.is_valid:
+                        self.cvs_draw_feature(self.session_data.measure_feature, draw_markers=['sn', 'rfl'])
+                        self.dlg_refresh_measurements(self.session_data.measure_feature)
+                    else:
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_measurement'))
+
+    def s_move_to_end(self):
+        """moves point to end of reference-line, max stationings"""
+        # Rev. 2024-07-28
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+            reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=self.session_data.measure_feature.ref_fid)
+            if reference_geom:
+                new_stationing = reference_geom.length()
+                self.session_data.measure_feature.recalc_by_stationing(new_stationing, 'Nabs')
+                if self.session_data.measure_feature.is_valid:
+                    self.cvs_draw_feature(self.session_data.measure_feature, draw_markers=['sn', 'rfl'])
+                    self.dlg_refresh_measurements(self.session_data.measure_feature)
+                else:
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+            else:
+                self.dlg_append_log_message('WARNING', error_msg)
         else:
-            self.my_dialogue.layers_and_fields_grb.setMaximumHeight(20)
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('no_measurement'))
 
-    def s_toggle_selection_grb(self, status):
-        """Toggle Group-Box in Dialog
-        :param status: isChecked()-State
-        """
-        # Rev. 2023-05-03
-        if status:
-            # no vertical limit
-            self.my_dialogue.selection_grb.setMaximumHeight(2147483647)
-        else:
-            self.my_dialogue.selection_grb.setMaximumHeight(20)
+    def scc_ref_line_style(self):
+        """change style of reference-line"""
+        # Rev. 2024-07-28
+        # {0: "None", 1: "Solid", 2: "Dash", 3: "Dot", 4: "DashDot", 5: "DashDotDot"}
+        self.stored_settings.ref_line_style = self.my_dialog.qcb_ref_line_style.currentData()
+        self.cvs_apply_style_to_graphics()
 
-    def s_measure_grb_toggle(self, status):
-        """Toggle Group-Box in Dialog
-        :param status: isChecked()-State
-        """
-        # Rev. 2023-05-03
-        if status:
-            self.my_dialogue.measure_grb.setMaximumHeight(2147483647)
-        else:
-            self.my_dialogue.measure_grb.setMaximumHeight(20)
-
-    def s_edit_grb_toggle(self, status):
-        """Toggle Group-Box in Dialog
-        :param status: isChecked()-State
-        """
-        # Rev. 2023-05-03
-        if status:
-            self.my_dialogue.edit_grb.setMaximumHeight(2147483647)
-        else:
-            self.my_dialogue.edit_grb.setMaximumHeight(20)
-
-    def s_change_ref_line_color(self, color: str):
-        """change color of reference-line
-        :param color: color in HexArgb-Format
-        """
-        # Rev. 2023-04-28
-        self.ss.ref_line_color = color
-        self.refresh_canvas_graphics()
-
-    def s_change_ref_line_width(self, line_width: int):
+    def scc_ref_line_width(self, line_width: int):
         """change width of reference-line
         :param line_width: width in pixel
         """
-        # Rev. 2023-04-28
-        self.ss.ref_line_width = line_width
-        self.refresh_canvas_graphics()
+        # Rev. 2024-07-28
+        self.stored_settings.ref_line_width = line_width
+        self.cvs_apply_style_to_graphics()
 
-    def s_change_ref_line_line_style(self):
-        """change style of reference-line"""
-        # {0: "None", 1: "Solid", 2: "Dash", 3: "Dot", 4: "DashDot", 5: "DashDotDot"}
-        # Rev. 2023-04-28
-        self.ss.ref_line_line_style = self.my_dialogue.qcb_ref_line_line_style.currentData()
-        self.refresh_canvas_graphics()
-
-    def s_change_pt_edit_pen_width(self, pen_width: int):
-        """change pen-width of edit-canvas-graphic (Point-Symbol)
-        :param pen_width: width in pixel
+    def scc_ref_line_color(self, color: str):
+        """change color of reference-line
+        :param color: color in HexArgb-Format
         """
-        # Rev. 2023-04-28
-        self.ss.pt_edit_pen_width = pen_width
-        self.refresh_canvas_graphics()
+        # Rev. 2024-07-28
+        self.stored_settings.ref_line_color = color
+        self.cvs_apply_style_to_graphics()
 
-    def s_change_pt_edit_icon_size(self, icon_size: int):
-        """change icon-Size of edit-canvas-graphic (Point-Symbol)
+    def scc_pt_sn_icon_type(self):
+        """change Point-Icon-Type"""
+        # Rev. 2024-07-28
+        # {0: "None", 1: "Cross", 2: "X", 3: "Box", 4: "Circle", 5: "Double-Triangle", 6: "Triangle", 7: "Rhombus", 8: "Inverted Triangle"}
+        self.stored_settings.pt_sn_icon_type = self.my_dialog.qcb_pt_sn_icon_type.currentData()
+        self.cvs_apply_style_to_graphics()
+
+    def scc_pt_sn_icon_size(self, icon_size: int):
+        """change Point-Icon-Size
         :param icon_size: size in pixel
         """
-        # Rev. 2023-04-28
-        self.ss.pt_edit_icon_size = icon_size
-        self.refresh_canvas_graphics()
+        # Rev. 2024-07-28
+        self.stored_settings.pt_sn_icon_size = icon_size
+        self.cvs_apply_style_to_graphics()
 
-    def s_change_pt_edit_icon_type(self):
-        """change icon_type of edit-canvas-graphic (Point-Symbol)"""
-        # {0: "None", 1: "Cross", 2: "X", 3: "Box", 4: "Circle", 5: "Double-Triangle", 6: "Triangle", 7: "Rhombus", 8: "Inverted Triangle"}
-        # Rev. 2023-04-28
-        self.ss.pt_edit_icon_type = self.my_dialogue.qcb_pt_edit_icon_type.currentData()
-        self.refresh_canvas_graphics()
-
-    def s_change_pt_edit_color(self, color: str):
-        """change color of edit-canvas-graphic
-        :param color: color in HexArgb-Format
-        """
-        # Rev. 2023-04-28
-        self.ss.pt_edit_color = color
-        self.refresh_canvas_graphics()
-
-    def s_change_pt_edit_fill_color(self, color: str):
-        """change fill-color of edit-canvas-graphic
-        :param color: color in HexArgb-Format
-        """
-        # Rev. 2023-04-28
-        self.ss.pt_edit_fill_color = color
-        self.refresh_canvas_graphics()
-
-    def s_change_pt_measure_pen_width(self, pen_width: int):
-        """change pen-width of measure-canvas-graphic (Point-Symbol)
+    def scc_pt_sn_pen_width(self, pen_width: int):
+        """change Point-Pen-Width
         :param pen_width: width in pixel
         """
-        # Rev. 2023-04-28
-        self.ss.pt_measure_pen_width = pen_width
-        self.refresh_canvas_graphics()
+        # Rev. 2024-07-28
+        self.stored_settings.pt_sn_pen_width = pen_width
+        self.cvs_apply_style_to_graphics()
 
-    def s_change_pt_measure_icon_size(self, icon_size: int):
-        """change icon-Size of measure-canvas-graphic (Point-Symbol)
-        :param icon_size: size in pixel
-        """
-        # Rev. 2023-04-28
-        self.ss.pt_measure_icon_size = icon_size
-        self.refresh_canvas_graphics()
-
-    def s_change_pt_measure_icon_type(self):
-        """change icon_type of measure-canvas-graphic (Point-Symbol)"""
-        # {0: "None", 1: "Cross", 2: "X", 3: "Box", 4: "Circle", 5: "Double-Triangle", 6: "Triangle", 7: "Rhombus", 8: "Inverted Triangle"}
-        # Rev. 2023-04-28
-        self.ss.pt_measure_icon_type = self.my_dialogue.qcb_pt_measure_icon_type.currentData()
-        self.refresh_canvas_graphics()
-
-    def s_change_pt_measure_color(self, color: str):
-        """change color of measure-canvas-graphic
+    def scc_pt_sn_color(self, color: str):
+        """change Point-Icon-Color
         :param color: color in HexArgb-Format
         """
-        # Rev. 2023-04-28
-        self.ss.pt_measure_color = color
-        self.refresh_canvas_graphics()
+        # Rev. 2024-07-28
+        self.stored_settings.pt_sn_color = color
+        self.cvs_apply_style_to_graphics()
 
-    def s_change_pt_measure_fill_color(self, color: str):
-        """change fill-color of measure-canvas-graphic
+    def scc_pt_sn_fill_color(self, color: str):
+        """change Point-Icon-Fill-Color
+        dependend on pt_sn_icon_type not allways visible
         :param color: color in HexArgb-Format
         """
-        # Rev. 2023-04-28
-        self.ss.pt_measure_fill_color = color
-        self.refresh_canvas_graphics()
+        # Rev. 2024-07-28
+        self.stored_settings.pt_sn_fill_color = color
+        self.cvs_apply_style_to_graphics()
 
-    def refresh_canvas_graphics(self):
-        """applies self.ss to canvas-grafics"""
-        # Rev. 2023-04-28
+    def cvs_apply_style_to_graphics(self):
+        """applies symbolization-styles to canvas-grafics
+        some styles customizable via self.stored_settings, some hard coded"""
+        # Rev. 2024-07-28
+        # current segments, solid light blue
+        self.rb_rfl_diff_cu.setWidth(5)
+        self.rb_rfl_diff_cu.setLineStyle(1)
+        self.rb_rfl_diff_cu.setColor(QtGui.QColor('#FF6495ED'))  # CornflowerBlue
+        self.rb_rfl_diff_cu.setOpacity(0.6)
 
-        # selection-rect, not customizable
+        # cached segments, solid dark blue
+        self.rb_rfl_diff_ca.setWidth(5)
+        self.rb_rfl_diff_ca.setLineStyle(1)
+        self.rb_rfl_diff_ca.setColor(QtGui.QColor('#FF483D8B'))  # DarkSlateBlue
+        self.rb_rfl_diff_ca.setOpacity(0.6)
+
+        # reference-line
+        self.rb_rfl.setWidth(self.stored_settings.ref_line_width)
+        self.rb_rfl.setLineStyle(self.stored_settings.ref_line_style)
+        self.rb_rfl.setColor(QtGui.QColor(self.stored_settings.ref_line_color))
+
+        # normal stationing point signature
+        self.vm_sn.setPenWidth(self.stored_settings.pt_sn_pen_width)
+        self.vm_sn.setIconSize(self.stored_settings.pt_sn_icon_size)
+        self.vm_sn.setIconType(self.stored_settings.pt_sn_icon_type)
+        self.vm_sn.setColor(QtGui.QColor(self.stored_settings.pt_sn_color))
+        self.vm_sn.setFillColor(QtGui.QColor(self.stored_settings.pt_sn_fill_color))
+
+        # selected point for edit
+        self.vm_en.setIconType(4)
+        self.vm_en.setPenWidth(2)
+        self.vm_en.setIconSize(30)
+        # same color as vm_sn
+        self.vm_en.setColor(QtGui.QColor(self.stored_settings.pt_sn_color))
+        self.vm_en.setFillColor(QtGui.QColor('#00ffffff'))
+
+        # selection-rect, not customizable, red border, half transparent
         self.rb_selection_rect.setWidth(2)
-        # red border, half transparent
         self.rb_selection_rect.setColor(QtGui.QColor(255, 0, 0, 100))
 
-        if self.ss.ref_line_width is not None:
-            self.rb_ref.setWidth(self.ss.ref_line_width)
-        if self.ss.ref_line_line_style is not None:
-            self.rb_ref.setLineStyle(self.ss.ref_line_line_style)
-        if self.ss.ref_line_color is not None:
-            self.rb_ref.setColor(QtGui.QColor(self.ss.ref_line_color))
+        # PostProcessing-Symbolization, not customizable
+        # cached po-pro-point: dark green box, bit larger than default for vm_sn
+        self.vm_pt_cn.setPenWidth(4)
+        self.vm_pt_cn.setIconSize(20)
+        self.vm_pt_cn.setIconType(3)
+        self.vm_pt_cn.setColor(QtGui.QColor('#FF006400'))  # DarkGreen
+        self.vm_pt_cn.setOpacity(0.6)
 
-        if self.ss.pt_measure_pen_width is not None:
-            self.vm_pt_measure.setPenWidth(self.ss.pt_measure_pen_width)
-        if self.ss.pt_measure_icon_size is not None:
-            self.vm_pt_measure.setIconSize(self.ss.pt_measure_icon_size)
-        if self.ss.pt_measure_icon_type is not None:
-            self.vm_pt_measure.setIconType(self.ss.pt_measure_icon_type)
-        if self.ss.pt_measure_color is not None:
-            self.vm_pt_measure.setColor(QtGui.QColor(self.ss.pt_measure_color))
-        if self.ss.pt_measure_fill_color is not None:
-            self.vm_pt_measure.setFillColor(QtGui.QColor(self.ss.pt_measure_fill_color))
-
-        if self.ss.pt_edit_pen_width is not None:
-            self.vm_pt_edit.setPenWidth(self.ss.pt_edit_pen_width)
-        if self.ss.pt_edit_icon_size is not None:
-            self.vm_pt_edit.setIconSize(self.ss.pt_edit_icon_size)
-        if self.ss.pt_edit_icon_type is not None:
-            self.vm_pt_edit.setIconType(self.ss.pt_edit_icon_type)
-        if self.ss.pt_edit_color is not None:
-            self.vm_pt_edit.setColor(QtGui.QColor(self.ss.pt_edit_color))
-        if self.ss.pt_edit_fill_color is not None:
-            self.vm_pt_edit.setFillColor(QtGui.QColor(self.ss.pt_edit_fill_color))
+        # cached reference-line, rarely used
+        self.rb_crfl.setWidth(2)
+        self.rb_crfl.setLineStyle(1)
+        self.rb_crfl.setColor(QtGui.QColor('#50505050'))
 
         self.iface.mapCanvas().refresh()
 
-    def s_zoom_to_ref_feature(self):
-        """zooms to the current snapped Reference-Feature and draws self.rb_ref,
-        fid comes from qcbn_snapped_ref_fid (QComboBoxN)"""
-        # Rev. 2023-04-28
-        if self.ds.refLyr:
-            ref_fid = self.my_dialogue.qcbn_snapped_ref_fid.currentData()
+    def s_select_current_ref_fid(self):
+        """highlights and optionally zooms to the current selected Reference-Feature,
+        triggered by currentIndexChanged on qcbn_reference_feature (QComboBoxN)
+        see similar dlg_select_qcbn_reference_feature, which also sets self.session_data.current_ref_fid and triggers select in qcbn_reference_feature"""
+        # Rev. 2024-07-28
+        zoom_to_feature = bool(QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers())
+        if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+            ref_fid = self.my_dialog.qcbn_reference_feature.currentData(self.ref_fid_role)
             if ref_fid is not None:
-                ref_feature = self.ds.refLyr.getFeature(ref_fid)
-                if ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                    extent = ref_feature.geometry().boundingBox()
-                    source_crs = self.ds.refLyr.crs()
-                    target_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-                    tr = qgis.core.QgsCoordinateTransform(source_crs, target_crs, qgis.core.QgsProject.instance())
-                    extent = tr.transformBoundingBox(extent)
-                    self.iface.mapCanvas().setExtent(extent)
-                    self.iface.mapCanvas().zoomByFactor(1.1)
-                    self.draw_reference_geom(ref_fid)
+                reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=ref_fid)
+                if reference_geom:
+                    self.session_data.current_ref_fid = ref_fid
+                    self.cvs_draw_reference_geom(reference_geom=reference_geom, zoom_to_feature=zoom_to_feature)
+                    self.dlg_refresh_measure_section()
                 else:
-                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "No valid Reference-feature with fid {apos}{0}{apos}"),ref_fid))
+                    self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_reference_feature_selected'))
+
+    def s_zoom_to_ref_feature(self):
+        """highlights and zooms the current selected Reference-Feature,
+        triggered by click on pb_zoom_to_ref_feature"""
+        # Rev. 2024-07-28
+        if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+            if self.session_data.current_ref_fid is not None:
+
+                self.cvs_draw_reference_geom(ref_fid=self.session_data.current_ref_fid, zoom_to_feature=True)
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_reference_feature_selected'))
+
+    def s_dialog_activated(self, activated: bool):
+        """re-enables the mapTool with last used tool-mode, if dialog gets focus and other mapTool is active
+        convenient if f. e. the mapTool "Pan" was used meanwhile
+        triggered by custom signal self.my_dialog.dialog_activated
+        not used anymore
+        :param activated: True on focus-get, False on focus-blur"""
+        # Rev. 2024-07-28
+        if activated and self.iface.mapCanvas().mapTool() != self:
+            self.iface.mapCanvas().setMapTool(self)
+            # check current settings against last used tool_mode
+            self.sys_check_settings()
 
     def s_dialog_close(self):
-        """slot for signal dialog_close, emitted on self.my_dialogue closeEvent
-        switch MapTool hide canvas-graphics"""
-        # Rev. 2023-04-28
+        """slot for custom signal self.my_dialog.dialog_close, emitted on close of self.my_dialog
+        Note: MapTool and (closed == hidden) dialog persist
+        """
+        # Rev. 2024-07-28
         try:
-            self.vm_pt_edit.hide()
-            self.vm_pt_measure.hide()
-            self.rb_ref.hide()
-            self.rb_selection_rect.hide()
             self.iface.actionPan().trigger()
+            self.cvs_hide_markers()
         except Exception as e:
-            # if called on unload and these Markers are already deleted
-            # print(f"Expected exception in {gdp()}: \"{e}\"")
             pass
 
-    def s_pan_to_measure(self):
-        """slot for pan canvas-extent to self.rs.snapped_ref_fid and self.rs.current_measure"""
-        # Rev. 2023-06-03
-        if self.cf.measure_completed:
-            self.pan_to_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
+    def s_zoom_to_stationings(self):
+        """zooms canvas-extent to self.session_data.measure_feature"""
+        # Rev. 2024-07-28
+        x_coords = []
+        y_coords = []
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers() or QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan'
 
-    def check_data_feature(self,check_pk,push_message:bool = True)->bool:
-        """check Data-feature: detect Null-Values
-        :param check_pk: PK of data-feature
-        :param push_message: false => silent mode, no message
-        """
-        warning_msg = ''
-        feature_ok = True
-        if self.cf.data_layer_complete and self.cf.reference_layer_complete:
-            data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, check_pk)
-            if data_feature and data_feature.isValid():
-                ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
-                if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                    measure = data_feature[self.ds.dataLyrMeasureField.name()]
-
-                    if measure == '' or measure is None or repr(measure) == 'NULL':
-                        feature_ok = False
-                        warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Data-feature with PK {apos}{0}{apos} is invalid: Null-Value in measurement-field {apos}{1}.{2}{apos}"),check_pk, self.ds.dataLyr.name(), self.ds.dataLyrMeasureField.name())
-                else:
-                    feature_ok = False
-                    warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt',"Data-feature with PK {apos}{0}{apos} is invalid: no Reference-feature with ID {apos}{1}{apos} in layer {apos}{2}{apos}"),check_pk,data_feature[self.ds.dataLyrReferenceField.name()],self.ds.refLyr.name())
+        if self.session_data.measure_feature is not None:
+            reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=self.session_data.measure_feature.ref_fid)
+            if reference_geom:
+                from_point = reference_geom.interpolate(self.session_data.measure_feature.snap_n_abs)
+                x_coords.append(from_point.asPoint().x())
+                y_coords.append(from_point.asPoint().y())
+                self.cvs_zoom_to_coords(x_coords, y_coords, extent_mode)
             else:
-                feature_ok = False
-                warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "no Data-feature with PK {apos}{0}{apos} in layer {apos}{1}{apos}"),check_pk, self.ds.dataLyr.name())
+                self.dlg_append_log_message('WARNING', error_msg)
+
         else:
-            feature_ok = False
-            warning_msg = QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference- and Data-Layer required, check Point-on-Line-settings...")
-            self.my_dialogue.tbw_central.setCurrentIndex(1)
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('no_measurement'))
 
-        if warning_msg is not None and push_message:
-            self.push_messages(warning_msg=warning_msg)
-
-        return feature_ok
-
-    def set_edit_pk(self, edit_pk, pan_to_feature: bool = True):
-        """sets the editable feature
-        set self.rs.edit_pk
-        adds this PK to self.rs.selected_pks (Feature-Selection)
-        :param edit_pk: PK-value of Show-Layer
-        :param pan_to_feature: True ➜ pan canvas False ➜ just select and highlight see PolEvt.set_edit_pk()
+    def tool_get_data_feature(self, data_feature: qgis.core.QgsFeature = None, data_fid: int = None, data_id: int | str = None) -> tuple:
+        """get data-feature
+        :param data_feature: check validity and return
+        :param data_fid: fid of data-feature
+        :param data_id: id of data-feature, queried against self.derived_settings.dataLyrIdField
+        :returns: tuple(qgis.core.QgsFeature,error_msg)
         """
-        # Rev. 2023-05-03
-        if self.check_data_feature(edit_pk):
-            data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-            ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
+        # Rev. 2024-07-28
+        error_msg = None
+        if data_feature:
+            pass
+        elif data_fid is not None:
+            if self.SVS.DATA_LAYER_EXISTS in self.system_vs:
+                data_feature = self.derived_settings.dataLyr.getFeature(data_fid)
+                if not (data_feature and data_feature.isValid()):
+                    error_msg = MY_DICT.tr('exc_data_feature_not_found_by_data_fid', data_fid)
+        elif data_id is not None:
+            if (self.SVS.DATA_LAYER_EXISTS | self.SVS.DATA_LAYER_ID_FIELD_DEFINED) in self.system_vs:
+                data_feature = tools.MyTools.get_feature_by_value(self.derived_settings.dataLyr, self.derived_settings.dataLyrIdField, data_id)
+                if not (data_feature and data_feature.isValid()):
+                    error_msg = MY_DICT.tr('exc_data_feature_not_found_by_data_id', data_id)
 
-            # no duplicates
-            if not edit_pk in self.rs.selected_pks:
-                self.rs.selected_pks.append(edit_pk)
-
-            self.rs.edit_pk = edit_pk
-            self.my_dialogue.le_edit_data_pk.setText(str(edit_pk))
-
-            self.ds.dataLyr.removeSelection()
-            self.ds.dataLyr.select(data_feature.id())
-
-            self.my_dialogue.tbw_central.setCurrentIndex(0)
-            # triggers s_edit_grb_toggle()
-            self.my_dialogue.edit_grb.setChecked(1)
-
-            # same in Show-Layer, if configured
-            if self.cf.show_layer_complete:
-                show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
-                if show_feature and show_feature.isValid():
-                    self.ds.showLyr.removeSelection()
-                    self.ds.showLyr.select(show_feature.id())
-
-            # Show Measure-Data of this Feature in Dialog
-            measure = data_feature[self.ds.dataLyrMeasureField.name()]
-            self.rs.snapped_ref_fid = ref_feature.id()
-            self.rs.current_measure = measure
-            self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, ref_feature.id())
-
-            self.check_settings()
-            self.dlg_refresh_measure_section()
-            self.dlg_refresh_edit_section()
-            self.dlg_refresh_feature_selection_section()
-            self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-            if pan_to_feature:
-                self.pan_to_measure(ref_feature.id(), self.rs.current_measure)
-            self.draw_measured_point(self.rs.snapped_ref_fid, measure)
-            self.draw_edit_point(self.rs.snapped_ref_fid, measure)
-            self.draw_reference_geom(self.rs.snapped_ref_fid)
-
-
-
-    def s_select_features(self):
-        """Toggle tool_mode 'select_features' for selecting point-features from showLyr"""
-        # Rev. 2023-05-03
-        self.vm_pt_edit.hide()
-        self.rb_ref.hide()
-
-        tool_mode = None
-        if self.rs.tool_mode == 'select_features':
-            tool_mode = 'measuring'
+        if data_feature and isinstance(data_feature, qgis.core.QgsFeature) and data_feature.isValid():
+            return data_feature, None
         else:
-            if self.cf.reference_layer_complete and self.cf.data_layer_complete and self.cf.show_layer_complete:
-                self.ds.showLyr.removeSelection()
-                tool_mode = 'select_features'
-            else:
-                tool_mode = 'measuring'
-                self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
+            return None, error_msg
 
-        self.check_settings(tool_mode)
-        self.dlg_refresh_feature_selection_section()
+    def tool_get_show_feature(self, show_feature: qgis.core.QgsFeature = None, show_fid: int = None, data_fid: int = None, data_id: int | str = None) -> tuple:
+        """get feature from show-layer
+        :param show_feature: check validity and return
+        :param show_fid: fid of show-feature
+        :param data_fid: fid of data-feature
+        :param data_id: id of data-feature, queried against self.derived_settings.dataLyrIdField
+        :returns: tuple(qgis.core.QgsFeature, error_msg)
+        """
+        # Rev. 2024-07-28
+        error_msg = None
+        if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+            if show_feature:
+                pass
+            elif show_fid is not None:
+                show_feature = self.derived_settings.showLyr.getFeature(show_fid)
+                if not (show_feature and show_feature.isValid()):
+                    error_msg = MY_DICT.tr('exc_show_feature_not_found_by_show_fid', show_fid)
 
-    def s_clear_feature_selection(self):
-        """remove selected point-features from QTableWidget"""
-        # Rev. 2023-05-03
-        self.rs.selected_pks = []
-        self.rs.edit_pk = None
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_edit_section()
-
-        if self.cf.show_layer_complete:
-            self.ds.showLyr.removeSelection()
-
-        if self.cf.data_layer_complete:
-            self.ds.dataLyr.removeSelection()
-
-    def s_append_all_features(self):
-        """Adds all Features to self.rs.selected_pks"""
-        # Rev. 2023-05-03
-        if self.cf.reference_layer_complete and self.cf.data_layer_complete:
-            self.rs.selected_pks = qgis.core.QgsVectorLayerUtils.getValues(self.ds.dataLyr, self.ds.dataLyrIdField.name(), selectedOnly=False)[0]
-            self.check_settings()
-            self.dlg_refresh_feature_selection_section()
-        else:
-            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
-
-    def s_append_data_features(self):
-        """Adds current selected Features from dataLyr to self.rs.selected_pks"""
-        # Rev. 2023-05-03
-        if self.cf.reference_layer_complete and self.cf.data_layer_complete:
-            additional_features = qgis.core.QgsVectorLayerUtils.getValues(self.ds.dataLyr, self.ds.dataLyrIdField.name(), selectedOnly=True)[0]
-            if len(additional_features):
-                if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-                    self.rs.selected_pks += additional_features
+            elif data_fid is not None:
+                if data_fid > 0:
+                    data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+                    if data_feature and data_feature.isValid():
+                        data_id = data_feature[self.stored_settings.dataLyrIdFieldName]
+                        show_feature = tools.MyTools.get_feature_by_value(self.derived_settings.showLyr, self.derived_settings.showLyrBackReferenceField, data_id)
+                        if not (show_feature and show_feature.isValid()):
+                            error_msg = MY_DICT.tr('exc_show_feature_not_found_by_data_fid', data_fid)
                 else:
-                    self.rs.selected_pks = additional_features
-                self.check_settings()
+                    error_msg = MY_DICT.tr('exc_no_show_feature_with_negative_data_fid', data_fid)
+
+            elif data_id is not None:
+                data_feature, error_msg = self.tool_get_data_feature(data_id=data_id)
+                if data_feature and data_feature.isValid():
+                    data_id = data_feature[self.stored_settings.dataLyrIdFieldName]
+                    show_feature = tools.MyTools.get_feature_by_value(self.derived_settings.showLyr, self.derived_settings.showLyrBackReferenceField, data_id)
+                    if not (show_feature and show_feature.isValid()):
+                        error_msg = MY_DICT.tr('exc_show_feature_not_found_by_data_id', data_id)
+
+        if show_feature and isinstance(show_feature, qgis.core.QgsFeature) and show_feature.isValid():
+            return show_feature, None
+        else:
+            return None, error_msg
+
+    def tool_get_reference_feature(self, ref_feature: qgis.core.QgsFeature = None, ref_fid: int = None, ref_id: int | str = None, data_fid: int = None) -> tuple:
+        """get reference-feature by multiple ways
+        :param ref_feature: check validity and return
+        :param ref_fid: get feature by QGis-fid
+        :param ref_id: get feature by registered self.derived_settings.refLyrIdField
+        :param data_fid: get feature by fid of data-feature
+        :returns: tuple(qgis.core.QgsFeature,error_msg)
+        """
+        # Rev. 2024-07-28
+        error_msg = None
+        if ref_feature is not None:
+            pass
+        elif ref_fid is not None:
+            if self.SVS.REFERENCE_LAYER_EXISTS in self.system_vs:
+                ref_feature = self.derived_settings.refLyr.getFeature(ref_fid)
+                if not (ref_feature and ref_feature.isValid()):
+                    error_msg = MY_DICT.tr('exc_reference_feature_not_found_by_ref_fid', ref_fid)
+
+        if ref_id is not None:
+            if self.SVS.REFERENCE_LAYER_COMPLETE in self.system_vs:
+                ref_feature = tools.MyTools.get_feature_by_value(self.derived_settings.refLyr, self.derived_settings.refLyrIdField, ref_id)
+                if not (ref_feature and ref_feature.isValid()):
+                    error_msg = MY_DICT.tr('exc_reference_feature_not_found_by_ref_id', ref_id)
+
+        elif data_fid is not None:
+            if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+                data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+                if data_feature:
+                    ref_id = data_feature[self.derived_settings.dataLyrReferenceField.name()]
+                    # recursive call with queried ref_id
+                    ref_feature, error_msg = self.tool_get_reference_feature(ref_id=ref_id)
+
+        if ref_feature and isinstance(ref_feature, qgis.core.QgsFeature) and ref_feature.isValid():
+            return ref_feature, None
+        else:
+            return None, error_msg
+
+    def tool_check_data_feature(self, data_feature: qgis.core.QgsFeature = None, data_fid=None, data_id=None) -> FVS:
+        """checks data_feature via FVS
+        callable with various references to data-feature
+        :param data_feature: the data-feature itself
+        :param data_fid: optionally for querying data_feature by feature-id, usable for temporary features in edit-buffer (fid negative)
+        :param data_id: optionally for querying data_feature from self.derived_settings.dataLyr
+        :returns: FVS
+        """
+        # Rev. 2024-07-28
+        fvs = FVS.INIT
+
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            data_feature, error_msg = self.tool_get_data_feature(data_feature, data_fid, data_id)
+
+            if data_feature:
+                fvs |= FVS.DATA_FEATURE_EXISTS
+
+                stationing = data_feature[self.derived_settings.dataLyrStationingField.name()]
+
+                if isinstance(stationing, numbers.Number):
+                    fvs |= FVS.STATIONING_NUMERIC
+
+                ref_id = data_feature[self.derived_settings.dataLyrReferenceField.name()]
+
+                if not (ref_id is None or ref_id == '' or repr(ref_id) == 'NULL'):
+                    fvs |= FVS.REFERENCE_ID_VALID
+                    reference_geom, error_msg = self.tool_get_reference_geom(ref_id=ref_id)
+                    if reference_geom:
+                        fvs |= FVS.REFERENCE_FEATURE_EXISTS
+                        fvs |= FVS.REFERENCE_GEOMETRY_EXIST
+                        ref_len = reference_geom.length()
+
+                        if self.stored_settings.lrMode in ['Nabs', 'Nfract']:
+                            geom_n_valid, error_msg = tools.MyTools.check_geom_n_valid(reference_geom)
+                            if geom_n_valid:
+                                fvs |= FVS.REFERENCE_GEOMETRY_VALID
+                        elif self.stored_settings.lrMode in ['Mabs']:
+                            geom_m_valid, error_msg = tools.MyTools.check_geom_m_valid(reference_geom)
+                            if geom_m_valid:
+                                fvs |= FVS.REFERENCE_GEOMETRY_VALID
+
+                        if (FVS.REFERENCE_GEOMETRY_VALID | FVS.STATIONING_NUMERIC) in fvs:
+                            if self.stored_settings.lrMode == 'Nabs':
+                                if 0 <= stationing <= ref_len:
+                                    fvs |= FVS.STATIONING_INSIDE_RANGE
+                            elif self.stored_settings.lrMode == 'Nfract':
+                                if 0 <= stationing <= 1:
+                                    fvs |= FVS.STATIONING_INSIDE_RANGE
+                            elif self.stored_settings.lrMode == 'Mabs':
+                                first_vertex_m, last_vertex_m, error_msg = tools.MyTools.get_first_last_vertex_m(reference_geom)
+                                if not error_msg:
+                                    if first_vertex_m <= stationing <= last_vertex_m:
+                                        fvs |= FVS.STATIONING_INSIDE_RANGE
+
+
+                    else:
+                        self.dlg_append_log_message('WARNING', error_msg)
+        return fvs
+
+    def tool_create_pol_feature(self, data_fid: int) -> PoLFeature:
+        """initializes PoLFeature by data_fid with values from data_feature
+        :param data_fid:
+        """
+        # Rev. 2024-07-28
+        pol_feature = PoLFeature()
+
+        if self.derived_settings.refLyr:
+            pol_feature.ref_lyr_id = self.derived_settings.refLyr.id()
+            pol_feature.reference_authid = self.derived_settings.refLyr.crs().authid()
+
+            if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+
+                fvs = self.tool_check_data_feature(data_fid=data_fid)
+
+                fvs.check_data_feature_valid()
+                if not fvs.is_valid:
+                    # only hints, invalid features can be selected, f.e. for edit
+                    # self.dlg_append_log_message('WARNING', MY_DICT.tr(fvs.first_fail_flag))
+                    # no more logs, because often called with uncommitted and uncomplete features, f.e. if an empty row was inserted in feature-table
+                    pass
+
+                data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+                if data_feature:
+                    pol_feature.data_fid = data_fid
+
+                    stationing = data_feature[self.derived_settings.dataLyrStationingField.name()]
+
+                    ref_id = data_feature[self.derived_settings.dataLyrReferenceField.name()]
+                    if ref_id:
+                        # ref_id can be NoneType for new inserted and yet incomplete features
+                        ref_feature, error_msg = self.tool_get_reference_feature(ref_id=ref_id)
+
+                        if ref_feature:
+                            pol_feature.ref_fid = ref_feature.id()
+                            if FVS.STATIONING_INSIDE_RANGE in fvs:
+                                pol_feature.recalc_by_stationing(stationing, self.stored_settings.lrMode)
+                                if not pol_feature.is_valid:
+                                    self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol_feature.last_error))
+                        else:
+                            self.dlg_append_log_message('WARNING', error_msg)
+
+                    return pol_feature
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
+
+
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('reference_or_data_layer_missing'))
+
+    def tool_select_feature(self, data_fid: int, draw_markers: str = None, extent_markers: str = None, extent_mode: str = None):
+        """sets self.session_data.edit_feature, the current selected Line-on-Line-Feature, for display and/or editing
+        refreshes (if necessary add missing row, else select and refresh) self.my_dialog.qtrv_feature_selection
+        :param data_fid: FID of Data-Layer, 1:1-relation
+        :param draw_markers: combination of marker-types
+        :param extent_markers: combination of marker-types, optional zoom to specific markers
+        :param extent_mode: zoom/pan
+        """
+        # Rev. 2024-07-28
+
+        self.session_data.edit_feature = None
+
+        self.dlg_clear_measurements()
+        self.cvs_hide_markers()
+
+        edit_feature = self.tool_create_pol_feature(data_fid)
+
+        if edit_feature:
+            self.session_data.edit_feature = edit_feature
+
+            if data_fid not in self.session_data.selected_fids:
+                self.session_data.selected_fids.append(data_fid)
                 self.dlg_refresh_feature_selection_section()
             else:
-                self.push_messages(info_msg=QtCore.QCoreApplication.translate('PolEvt', "No selection in Data-Layer..."))
-        else:
-            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
+                self.dlg_select_feature_selection_row(data_fid)
+
+            self.cvs_draw_feature(edit_feature, draw_markers, extent_markers, extent_mode)
+
+            # additionally use clone for measure_feature in measure-area
+            self.session_data.measure_feature = edit_feature.__copy__()
+            self.dlg_refresh_measurements(self.session_data.measure_feature)
+            self.dlg_select_qcbn_reference_feature(self.session_data.measure_feature.ref_fid)
+
+            self.dlg_refresh_measure_section()
+
+    def dlg_select_feature_selection_row(self, data_fid: int):
+        """visually select row in qtrv_feature_selection
+        font-weight and border realized via selectionModel and QStyledItemDelegate
+        highlight-color and text via QtGui.QPalette.Highlight rsp. QtGui.QPalette.HighlightedText
+        :param data_fid:
+        """
+        # Rev. 2024-07-28
+        with (QtCore.QSignalBlocker(self.my_dialog.qtrv_feature_selection)):
+            with QtCore.QSignalBlocker(self.my_dialog.qtrv_feature_selection.selectionModel()):
+                model = self.my_dialog.qtrv_feature_selection.model()
+                selection_model = self.my_dialog.qtrv_feature_selection.selectionModel()
+                selection_model.clearSelection()
+                # find the matching row, returns only 1 match, MatchRecursive for TreeView
+                matches = model.match(model.index(0, 0), self.data_fid_role, data_fid, 1, QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive)
+                for index in matches:
+                    # select whole row
+                    selection_model.select(index, QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+                    # and (re-)open the parent branch
+                    self.my_dialog.qtrv_feature_selection.setExpanded(index.parent(), True)
+
+        self.my_dialog.qtrv_feature_selection.update()
+
+    def dlg_select_po_pro_selection_row(self, data_fid):
+        """visually select row in qtrv_po_pro_selection
+        font-weight and border realized via selectionModel and QStyledItemDelegate
+        highlight-color and text via QtGui.QPalette.Highlight rsp. QtGui.QPalette.HighlightedText
+        :param data_fid:
+        """
+        # Rev. 2024-07-28
+        with (QtCore.QSignalBlocker(self.my_dialog.qtrv_po_pro_selection)):
+            with QtCore.QSignalBlocker(self.my_dialog.qtrv_po_pro_selection.selectionModel()):
+                model = self.my_dialog.qtrv_po_pro_selection.model()
+                selection_model = self.my_dialog.qtrv_po_pro_selection.selectionModel()
+                selection_model.clearSelection()
+                # find the matching row, returns only 1 match
+                matches = model.match(model.index(0, 0), self.data_fid_role, data_fid, 1, QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive)
+                for index in matches:
+                    # select whole row
+                    selection_model.select(index, QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+                    # and (re-)open the parent branch
+                    self.my_dialog.qtrv_po_pro_selection.setExpanded(index.parent(), True)
+
+        self.my_dialog.qtrv_po_pro_selection.update()
+
+    def s_clear_feature_selection(self):
+        """clear self.session_data.selected_fids and self.session_data.edit_feature
+        refresh Feature-Selection"""
+        # Rev. 2024-07-28
+        self.session_data.selected_fids = []
+        self.session_data.edit_feature = None
+        self.dlg_refresh_feature_selection_section()
+        self.dlg_refresh_measure_section()
+
+    def s_append_data_features(self):
+        """Adds features from dataLyr to self.session_data.selected_fids"""
+
+        selection_mode = 'select_all'
+        if QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers():
+            selection_mode = 'append_selected'
+        elif QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers():
+            selection_mode = 'select_selected'
+
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            if selection_mode == 'select_selected' or selection_mode == 'append_selected':
+                additional_feature_ids = self.derived_settings.dataLyr.selectedFeatureIds()
+                if len(additional_feature_ids):
+                    if selection_mode == 'select_selected':
+                        self.session_data.selected_fids = additional_feature_ids
+                    else:
+                        self.session_data.selected_fids += additional_feature_ids
+                else:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('no_selection_in_data_layer'))
+            else:
+                # selection_mode = 'select_all'
+                additional_feature_ids = [f.id() for f in self.derived_settings.dataLyr.getFeatures()]
+                if len(additional_feature_ids):
+                    self.session_data.selected_fids = additional_feature_ids
+                else:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('no_features_in_data_layer'))
+
+            self.dlg_refresh_feature_selection_section()
+
+    def s_clear_post_processing(self):
+        """stops PostProcessing by clearing self.session_data.po_pro_reference_cache/po_pro_data_cache
+        and refreshes dialog-section
+        """
+        # Rev. 2024-09-04
+        self.cvs_hide_markers()
+        if self.session_data.po_pro_data_cache:
+            dialog_result = QtWidgets.QMessageBox.question(
+                None,
+                f"LinearReferencing ({get_debug_pos()})",
+                MY_DICT.tr('clear_post_processing_dlg_txt'),
+                buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                defaultButton=QtWidgets.QMessageBox.Yes
+            )
+
+            if dialog_result == QtWidgets.QMessageBox.Yes:
+                self.session_data.po_pro_reference_cache = {}
+                self.session_data.po_pro_data_cache = {}
+                self.dlg_refresh_po_pro_section()
+
+    def s_zoom_to_po_pro_selection(self):
+        """Zooms canvas to post-processing-selection
+        iterates through po_pro_selection
+        checks validity,
+        calculates segment-geometries with cached and current stationings rsp. reference-geometries,
+        zooms to their combined extents
+        """
+        # Rev. 2024-07-28
+        x_coords = []
+        y_coords = []
+
+        skipped_fids = []
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            for fid in self.session_data.po_pro_data_cache:
+                data_feature, error_msg = self.tool_get_data_feature(data_fid=fid)
+                if data_feature:
+                    measure_feature = self.tool_create_pol_feature(data_feature.id())
+
+                    cached_feature = self.session_data.po_pro_data_cache[fid]
+
+                    ref_id = data_feature[self.derived_settings.dataLyrReferenceField.name()]
+
+                    ref_feature, error_msg = self.tool_get_reference_feature(ref_id=ref_id)
+                    if ref_feature:
+                        current_geom = ref_feature.geometry()
+                        ref_fid = ref_feature.id()
+                        if ref_fid in self.session_data.po_pro_reference_cache:
+                            cached_geom = self.session_data.po_pro_reference_cache[ref_fid]
+
+                            projected_point = cached_geom.interpolate(cached_feature.snap_n_abs)
+                            if not projected_point.isEmpty():
+                                x_coords.append(projected_point.asPoint().x())
+                                y_coords.append(projected_point.asPoint().y())
+
+                        else:
+                            skipped_fids.append(fid)
+                            # self.dlg_append_log_message('WARNING', MY_DICT.tr('po_pro_cached_reference_feature_missing_or_invalid', ref_fid))
+                    else:
+                        skipped_fids.append(fid)
+                        # self.dlg_append_log_message('WARNING', MY_DICT.tr('po_pro_reference_feature_missing_or_invalid', ref_id))
+                else:
+                    skipped_fids.append(fid)
+                    # self.dlg_append_log_message('WARNING', MY_DICT.tr('po_pro_data_feature_missing_or_invalid', fid))
+
+            # queried extents in layer-projection
+            self.cvs_zoom_to_coords(x_coords, y_coords, 'zoom', self.derived_settings.refLyr.crs())
+
+            if len(skipped_fids) > 0:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('data_cache_features_dlg_skipped', len(skipped_fids)))
+
+    def s_feature_selection_to_data_layer_filter(self):
+        """creates a filter-query on data-layer (provider-side) for the current selected features
+        show-layers using data-layer are filtered too
+        ctrl-click removes filter"""
+        # Rev. 2024-07-28
+
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            if not self.derived_settings.dataLyr.isEditable():
+                if QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers():
+                    if self.derived_settings.dataLyr.subsetString() == '':
+                        self.dlg_append_log_message('INFO', MY_DICT.tr('no_filter'))
+                    else:
+                        # clear filter
+                        self.derived_settings.dataLyr.setSubsetString('')
+                        # rest is done by sys_layer_slot
+                else:
+                    if self.session_data.selected_fids:
+
+                        # Note:
+                        # the subset is q query-expression on the provider-side, so it must use the provider-side-ID-field, not the QGis internal feature._id()
+                        # allthough mostly identic, but not allways
+                        data_ids = []
+                        for fid in self.session_data.selected_fids:
+                            data_feature, error_msg = self.tool_get_data_feature(data_fid=fid)
+                            if data_feature:
+                                data_ids.append(data_feature[self.derived_settings.dataLyrIdField.name()])
+
+                        if data_ids:
+                            integer_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong]
+                            if self.derived_settings.dataLyrIdField.type() in integer_field_types:
+                                # ID-field integer, but the join-concatentation requires an array of strings
+                                select_in_string = ','.join([str(_id) for _id in data_ids])
+                            else:
+                                # ID-field not integer, so the ids for the provider-side concatenated sql-filter-clause have to be enclosed with quotation marks
+                                select_in_string = ','.join([("'" + str(_id) + "'") for _id in data_ids])
+
+                            filter_expression = f'"{self.derived_settings.dataLyrIdField.name()}" in ({select_in_string})'
+                            self.derived_settings.dataLyr.setSubsetString(filter_expression)
+                            # rest is done by sys_layer_slot, dataLyr->subsetStringChanged-signal
+                            # dependend show-layer will automatically be filtered, too
+
+                    else:
+                        self.dlg_append_log_message('INFO', MY_DICT.tr('no_features_listet'))
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_filter_if_editable'))
+
+    def s_transfer_feature_selection(self):
+        """transfer complete feature-selection to data- and show-layer
+        see st_select_in_layer for single features"""
+        # Rev. 2024-07-28
+        # visually remove graphics and unselect qtrv_feature_selection
+        self.cvs_hide_markers()
+
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+
+            selection_mode = 'replace_selection'
+            if QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers():
+                selection_mode = 'remove_from_selection'
+            elif QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers():
+                selection_mode = 'add_to_selection'
+
+            if self.session_data.selected_fids:
+                # same feature in data-layer and show-layer can have different fids
+                show_fids = []
+                if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                    for data_fid in self.session_data.selected_fids:
+                        show_feature, error_msg = self.tool_get_show_feature(data_fid=data_fid)
+                        if show_feature:
+                            show_fids.append(show_feature.id())
+
+                if selection_mode == 'replace_selection':
+                    self.derived_settings.dataLyr.removeSelection()
+                    self.derived_settings.dataLyr.select(self.session_data.selected_fids)
+                    if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                        self.derived_settings.showLyr.removeSelection()
+                        self.derived_settings.showLyr.select(show_fids)
+                elif selection_mode == 'remove_from_selection':
+                    self.derived_settings.dataLyr.deselect(self.session_data.selected_fids)
+                    if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                        self.derived_settings.showLyr.deselect(show_fids)
+                else:
+                    self.derived_settings.dataLyr.select(self.session_data.selected_fids)
+                    if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                        self.derived_settings.showLyr.select(show_fids)
+
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_features_listet'))
 
     def s_zoom_to_feature_selection(self):
         """Zooms canvas to feature-selection
-        iterates through self.rs.selected_pks
+        iterates through self.session_data.selected_fids
         checks validity,
         calculates Point-Geometries and their extent,
-        zooms/pans to this extent,
-        selects features in dataLyr and (optional) showLyr (not required)
+        zooms/pans to this extent
         """
-        # Rev. 2023-05-08
-        if self.cf.reference_layer_complete and self.cf.data_layer_complete and self.rs.selected_pks.__len__():
-            show_fids = []
-            data_fids = []
+        # Rev. 2024-07-28
 
-            # calculate extent of the selected PoL-Features
-            top = -sys.float_info.max
-            right = -sys.float_info.max
-            left = sys.float_info.max
-            bottom = sys.float_info.max
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            if self.session_data.selected_fids:
+                # calculate extent of the selected PoL-Features
+                # Point and Segment-Geometry taken into account
+                x_coords = []
+                y_coords = []
+                skipped_fids = []
+                for data_fid in self.session_data.selected_fids:
+                    data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+                    if data_feature:
+                        ref_id = data_feature[self.derived_settings.dataLyrReferenceField.name()]
+                        stationing = data_feature[self.derived_settings.dataLyrStationingField.name()]
+                        ref_feature, error_msg = self.tool_get_reference_feature(ref_id=ref_id)
+                        if ref_feature:
+                            if ref_feature.hasGeometry():
+                                pol = PoLFeature()
+                                pol.set_ref_fid(self.derived_settings.refLyr, ref_feature.id())
+                                pol.recalc_by_stationing(stationing, self.stored_settings.lrMode)
 
-            for edit_pk in self.rs.selected_pks:
-                data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-                if data_feature and data_feature.isValid():
-                    ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                        measure = data_feature[self.ds.dataLyrMeasureField.name()]
-                        ref_feature_geom = ref_feature.geometry()
-                        projected_point = ref_feature_geom.interpolate(measure)
-                        if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                            projected_point.transform(qgis.core.QgsCoordinateTransform(self.ds.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
+                                if pol.is_valid:
+                                    projected_point = ref_feature.geometry().interpolate(pol.snap_n_abs)
+                                    if not projected_point.isEmpty():
+                                        x_coords.append(projected_point.asPoint().x())
+                                        y_coords.append(projected_point.asPoint().y())
+                                else:
+                                    skipped_fids.append(data_fid)
 
-                        if projected_point:
-                            left = min(left, projected_point.asPoint().x())
-                            bottom = min(bottom, projected_point.asPoint().y())
-                            right = max(right, projected_point.asPoint().x())
-                            top = max(top, projected_point.asPoint().y())
+                            else:
+                                skipped_fids.append(data_fid)
+                        else:
+                            skipped_fids.append(data_fid)
+                    else:
+                        skipped_fids.append(data_fid)
 
-                            # projected_point ➜ QgsGeometry
-                            data_fids.append(data_feature.id())
+                self.cvs_zoom_to_coords(x_coords, y_coords, 'zoom', self.derived_settings.refLyr.crs())
 
-                            if self.cf.show_layer_complete:
-                                show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
-                                if show_feature and show_feature.isValid():
-                                    show_fids.append(show_feature.id())
+                # make unique
+                skipped_fids = list(dict.fromkeys(skipped_fids))
 
-            self.ds.dataLyr.removeSelection()
-            self.ds.dataLyr.selectByIds(data_fids)
+                if len(skipped_fids) > 0:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('skipped_invalids_msg', len(skipped_fids), len(self.session_data.selected_fids)))
 
-            if self.cf.show_layer_complete:
-                self.ds.showLyr.removeSelection()
-                self.ds.showLyr.selectByIds(show_fids)
 
-            # zoomToSelected without layer:
-            if left < right or bottom < top:
-                # valuable extent ➜ zoom
-                extent = qgis.core.QgsRectangle(left, bottom, right, top)
-                self.iface.mapCanvas().setExtent(extent)
-                self.iface.mapCanvas().zoomByFactor(1.1)
-            elif left == right and bottom == top:
-                # single feature or all features with same calculated point ➜ pan
-                center_point = qgis.core.QgsPointXY(left, bottom)
-                self.iface.mapCanvas().setCenter(center_point)
             else:
-                # no feature or no point calculable, left/top/right/bottom as initialized with +- sys.float_info.max
-                self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "no extent calculable for these features"))
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_features_listet'))
 
     def s_append_show_features(self):
-        """Adds current selected Features from showLyr to self.rs.selected_pks"""
-        # Rev. 2023-05-03
-        if self.cf.reference_layer_complete and self.cf.data_layer_complete and self.cf.show_layer_complete:
+        """Adds features from showLyr to self.session_data.selected_fids
+        Note: features must be committed in dataLyr (fid positive)
+        """
+        # Rev. 2024-07-28
 
-            additional_features = qgis.core.QgsVectorLayerUtils.getValues(self.ds.showLyr, self.ds.showLyrBackReferenceField.name(), selectedOnly=True)[0]
-            if len(additional_features):
-                if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-                    self.rs.selected_pks += additional_features
-                else:
-                    self.rs.selected_pks = additional_features
+        selection_mode = 'select_all'
+        if QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers() and QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers():
+            selection_mode = 'append_selected'
+        elif QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers():
+            selection_mode = 'select_selected'
 
-                self.check_settings()
-                self.dlg_refresh_feature_selection_section()
-            else:
-                self.push_messages(info_msg=QtCore.QCoreApplication.translate('PolEvt', "No selection in Show-Layer..."))
-        else:
-            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements, Reference-, Data- and Show-Layer required..."))
+        if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+            additional_feature_ids = []
+            if selection_mode == 'select_selected' or selection_mode == 'append_selected':
+                # fids in show-layer can be different from fids in data-layer
 
-    def s_update_feature(self):
-        """Show feature-form for edit and save segment to Data-Layer"""
-        # Rev. 2023-04-27
-        try_it = True
-        did_it = False
-        critical_msg = ''
-        success_msg = ''
-        info_msg = ''
-        warning_msg = ''
-        if self.cf.update_enabled and self.rs.edit_pk is not None:
-            if self.check_data_feature(self.rs.edit_pk):
-                # get current edit-values from runtime-settings, not from dialogue-widgets
-                data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, self.rs.edit_pk)
-                ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
+                for show_feature in self.derived_settings.showLyr.getSelectedFeatures():
+                    data_feature, error_msg = self.tool_get_data_feature(data_id=show_feature[self.stored_settings.showLyrBackReferenceFieldName])
+                    if data_feature:
+                        additional_feature_ids.append(data_feature.id())
 
-                if self.ds.dataLyr.isEditable():
-                    if self.ds.dataLyr.isModified():
-                        dialog_result = QtWidgets.QMessageBox.question(
-                            None,
-                            f"LinearReferencing Update Feature ({gdp()})",
-                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "{div_pre_1}Layer {apos}{0}{apos} is editable!{div_ml_1}[Yes]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session with save{br}[No]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session without save{br}[Cancel]{nbsp}{arrow} Quit...{div_ml_2}{div_pre_2}"),self.ds.dataLyr.name()),
-                            buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
-                            defaultButton=QtWidgets.QMessageBox.Yes
-                        )
-
-                        if dialog_result == QtWidgets.QMessageBox.Yes:
-                            self.ds.dataLyr.commitChanges()
-                        elif dialog_result == QtWidgets.QMessageBox.No:
-                            self.ds.dataLyr.rollBack()
-                        else:
-                            try_it = False
-                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
+                if len(additional_feature_ids):
+                    if selection_mode == 'select_selected':
+                        self.session_data.selected_fids = additional_feature_ids
                     else:
-                        self.ds.dataLyr.rollBack()
-
-                if try_it:
-                    # num_digits = 2
-                    # if self.ds.refLyr.crs().isGeographic():
-                    #     num_digits = 6
-                    # measure = round(self.rs.current_measure, num_digits)
-
-                    measure = max(0, min(ref_feature.geometry().length(), self.rs.current_measure))
-                    data_feature[self.ds.dataLyrReferenceField.name()] = ref_feature[self.ds.refLyrPkField.name()]
-                    data_feature[self.ds.dataLyrMeasureField.name()] = measure
-
-                    try:
-                        self.ds.dataLyr.startEditing()
-                        dlg_result = self.iface.openFeatureForm(self.ds.dataLyr, data_feature)
-                        if dlg_result:
-                            update_ref_pk = data_feature[self.ds.dataLyrReferenceField.name()]
-                            update_measure = data_feature[self.ds.dataLyrMeasureField.name()]
-                            update_ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, update_ref_pk)
-                            # user could have changed feature-data in dialog (PK, Reference-id, measure)
-                            # ➜ validity-check like "Reference-id exists in refLyr?" "measure 0 ...referenced_line_length?"
-                            if update_ref_feature and update_ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-
-                                if ref_feature.geometry().constGet().partCount() > 1:
-                                    warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Referenced linestring-geometry {apos}{0}{apos} in layer {apos}{1}{apos} is {2}-parted, Point-on-Line-feature not calculable"),self.rs.snapped_ref_fid, self.ds.refLyr.name(), ref_feature.geometry().constGet().partCount())
-
-                                if update_measure < 0 or update_measure > update_ref_feature.geometry().length():
-                                    info_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "measure {0} truncated to range 0 ... {1}"),update_measure, update_ref_feature.geometry().length())
-                                    data_feature[self.ds.dataLyrMeasureField.name()] = max(0, min(update_ref_feature.geometry().length(), update_measure))
-
-                                self.ds.dataLyr.updateFeature(data_feature)
-                                commit_result = self.ds.dataLyr.commitChanges()
-                                if commit_result:
-                                    did_it = True
-                                    success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with ID {apos}{0}{apos} successfully updated in Data-Layer {apos}{1}{apos}..."),self.rs.edit_pk, self.ds.dataLyr.name())
-                                else:
-                                    self.ds.dataLyr.rollBack()
-                                    critical_msg = str(self.ds.dataLyr.commitErrors())
-                            else:
-                                self.ds.dataLyr.rollBack()
-                                critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Update feature failed, no Reference-feature with PK {apos}{0}{apos} in Data-Layer {apos}{1}{apos} ..."),update_ref_pk, self.ds.refLyr.name())
-                        else:
-                            self.ds.dataLyr.rollBack()
-                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
-
-                    except Exception as err:
-                        self.ds.dataLyr.rollBack()
-                        critical_msg = f"Exception '{err.__class__.__name__}' in {gdp()}: {err}"
-        else:
-            critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Update feature failed, missing privileges in Data-Layer {apos}{0}{apos}..."),self.ds.dataLyr.name())
-
-        if did_it:
-            self.vm_pt_edit.hide()
-            self.vm_pt_measure.hide()
-            if self.cf.show_layer_complete:
-                self.ds.showLyr.updateExtents()
-                if self.iface.mapCanvas().isCachingEnabled():
-                    self.ds.showLyr.triggerRepaint()
+                        self.session_data.selected_fids += additional_feature_ids
                 else:
-                    self.iface.mapCanvas().refresh()
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('no_selection_in_show_layer'))
+            else:
+                # selection_mode = 'select_all'
+                for show_feature in self.derived_settings.showLyr.getFeatures():
+                    data_feature, error_msg = self.tool_get_data_feature(data_id=show_feature[self.stored_settings.showLyrBackReferenceFieldName])
+                    if data_feature:
+                        additional_feature_ids.append(data_feature.id())
 
-            self.set_edit_pk(self.rs.edit_pk, False)
+                if len(additional_feature_ids):
+                    self.session_data.selected_fids = additional_feature_ids
+                else:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('no_features_in_show_layer'))
 
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
+            self.dlg_refresh_feature_selection_section()
 
     def s_open_ref_form(self):
-        """opens the attribute-form for the Reference-Layer, draws self.rb_ref
-        fid comes from qcbn_snapped_ref_fid (QComboBoxN)"""
-        # Rev. 2023-05-03
-        if self.cf.reference_layer_defined:
-            # feature-id != PK ➜ always integer
-            ref_fid = self.my_dialogue.qcbn_snapped_ref_fid.currentData()
-            if ref_fid is not None:
-                ref_feature = self.ds.refLyr.getFeature(ref_fid)
-                if ref_feature and ref_feature.isValid():
-                    self.iface.openFeatureForm(self.ds.refLyr, ref_feature)
-                    self.draw_reference_geom(ref_fid)
+        """for self.session_data.current_ref_fid: open attribute-form, highlight geometry on map, optional zoom with shift"""
+        # Rev. 2024-07-28
+        if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+            if self.session_data.current_ref_fid is not None:
+                ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=self.session_data.current_ref_fid)
+                zoom_to_feature = bool(QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers())
+                if ref_feature:
+                    # allways show feature-form, if feature exists:
+                    feature_form = tools.MyTools.get_feature_form(self.iface, self.derived_settings.refLyr, ref_feature)
+                    feature_form.show()
+                    # draw and optionally zoom:
+                    if ref_feature.hasGeometry():
+                        self.cvs_draw_reference_geom(reference_geom=ref_feature.geometry(), zoom_to_feature=zoom_to_feature)
+                    else:
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
                 else:
-                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with FID {apos}{0}{apos} in Reference-Layer {apos}{1}{apos} not found or not valid"),ref_fid, self.ds.refLyr.name()))
+                    self.dlg_append_log_message("WARNING", error_msg)
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_reference_feature_selected'))
 
-    def s_open_show_lyr_tbl(self):
+    def s_open_show_tbl(self):
         """opens the Show-Layer-attribute-table"""
-        # Rev. 2023-05-03
-        if self.cf.show_layer_defined:
-            self.iface.showAttributeTable(self.ds.showLyr)
+        # Rev. 2024-07-29
+        if self.SVS.SHOW_LAYER_EXISTS in self.system_vs:
+            self.iface.showAttributeTable(self.derived_settings.showLyr)
 
     def s_open_data_tbl(self):
         """opens the Data-Layer-attribute-table """
-        # Rev. 2023-05-03
-        if self.cf.data_layer_defined:
-            self.iface.showAttributeTable(self.ds.dataLyr)
+        # Rev. 2024-07-29
+        if self.SVS.DATA_LAYER_EXISTS in self.system_vs:
+            self.iface.showAttributeTable(self.derived_settings.dataLyr)
 
     def s_open_ref_tbl(self):
         """opens the Reference-Layer-attribute-table """
-        # Rev. 2023-05-03
-        if self.cf.reference_layer_defined:
-            self.iface.showAttributeTable(self.ds.refLyr)
+        # Rev. 2024-07-29
+        if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+            self.iface.showAttributeTable(self.derived_settings.refLyr)
 
     def s_define_ref_lyr_display_expression(self):
-        """opens the dialog for editing the displayExpression of Reference-Layer"""
-        # Rev. 2023-05-09
-        if self.cf.reference_layer_defined:
-            dlg = qgis.gui.QgsExpressionBuilderDialog(self.ds.refLyr, self.ds.refLyr.displayExpression())
-            dlg.setWindowTitle(qt_format(QtCore.QCoreApplication.translate('PolEvt', "Edit displayExpression for Reference-Layer {apos}{0}{apos}"),self.ds.refLyr.name()))
+        """opens the dialog for editing the displayExpression of Reference-Layer
+        if expression is accepeted the displayExpressionChanged-Signal-Slot will be triggered"""
+
+        if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+            dlg = qgis.gui.QgsExpressionBuilderDialog(self.derived_settings.refLyr, self.derived_settings.refLyr.displayExpression())
+            dlg.setWindowTitle(MY_DICT.tr('edit_display_exp_dlg_title', self.derived_settings.refLyr.name()))
             exec_result = dlg.exec()
             if exec_result:
-                # expressionBuilder ➜ https://api.qgis.org/api/classQgsExpressionBuilderWidget.html
+                # expressionBuilder -> https://api.qgis.org/api/classQgsExpressionBuilderWidget.html
                 if dlg.expressionBuilder().isExpressionValid():
-                    self.ds.refLyr.setDisplayExpression(dlg.expressionText())
-                    self.check_settings()
-                    self.dlg_refresh_reference_layer_section()
-                    self.dlg_refresh_feature_selection_section()
-                    self.push_messages(success_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} valid and used as DisplayExpression for Reference-Layer {apos}{1}{apos}"),dlg.expressionText(), self.ds.refLyr.name()))
+                    self.derived_settings.refLyr.setDisplayExpression(dlg.expressionText())
+                    self.dlg_append_log_message('SUCCESS', MY_DICT.tr('display_exp_valid', self.derived_settings.refLyr.name()))
+                    # dialog-refresh is done by trigger
                 else:
-                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} invalid and not used as DisplayExpression for Reference-Layer {apos}{1}{apos}, please check syntax!"),dlg.expressionText(), self.ds.refLyr.name()))
-        else:
-            # should not happen, because QPushButton disabled
-            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No Reference-Layer defined yet"))
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('display_exp_invalid', self.derived_settings.refLyr.name()))
 
     def s_define_data_lyr_display_expression(self):
-        """opens the dialog for editing the displayExpression of Data-Layer"""
-        # Rev. 2023-05-09
-        if self.cf.data_layer_defined:
-            dlg = qgis.gui.QgsExpressionBuilderDialog(self.ds.dataLyr, self.ds.dataLyr.displayExpression())
-            dlg.setWindowTitle(qt_format(QtCore.QCoreApplication.translate('PolEvt', "Edit displayExpression for Data-Layer {apos}{0}{apos}"),self.ds.dataLyr.name()))
+        """opens the dialog for editing the displayExpression of Data-Layer
+        if expression is accepeted the displayExpressionChanged-Signal-Slot will be triggered
+        """
+        # Rev. 2024-07-29
+        if self.SVS.DATA_LAYER_EXISTS in self.system_vs:
+            dlg = qgis.gui.QgsExpressionBuilderDialog(self.derived_settings.dataLyr, self.derived_settings.dataLyr.displayExpression())
+            dlg.setWindowTitle(MY_DICT.tr('edit_display_exp_dlg_title', self.derived_settings.dataLyr.name()))
             exec_result = dlg.exec()
             if exec_result:
-                # expressionBuilder ➜ https://api.qgis.org/api/classQgsExpressionBuilderWidget.html
                 if dlg.expressionBuilder().isExpressionValid():
-                    self.ds.dataLyr.setDisplayExpression(dlg.expressionText())
-                    # self.dlg_refresh_feature_selection_section() ➜ triggered automatically
-                    self.push_messages(success_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} valid and used as DisplayExpression for Data-Layer {apos}{1}{apos}"),dlg.expressionText(), self.ds.dataLyr.name()))
+                    self.derived_settings.dataLyr.setDisplayExpression(dlg.expressionText())
+                    self.dlg_append_log_message('SUCCESS', MY_DICT.tr('display_exp_valid', self.derived_settings.dataLyr.name()))
+                    # dialog-refresh is done by trigger
                 else:
-                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} invalid and not used as DisplayExpression for Data-Layer {apos}{1}{apos}, please check syntax!"),dlg.expressionText(), self.ds.dataLyr.name()))
-        else:
-            # should not happen, because QPushButton disabled
-            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No Data-Layer defined yet"))
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('display_exp_invalid', self.derived_settings.dataLyr.name()))
 
-    def s_define_show_lyr_display_expression(self):
+    def s_define_show_layer_display_expression(self):
         """opens the dialog for editing the displayExpression of Show-Layer
-        see connect_show_layer"""
-        # Rev. 2023-05-09
-        if self.cf.show_layer_defined:
-            dlg = qgis.gui.QgsExpressionBuilderDialog(self.ds.showLyr, self.ds.showLyr.displayExpression())
-            dlg.setWindowTitle(qt_format(QtCore.QCoreApplication.translate('PolEvt', "Edit displayExpression for Show-Layer {apos}{0}{apos}"),self.ds.showLyr.name()))
+        if expression is accepeted the displayExpressionChanged-Signal-Slot will be triggered
+        """
+        # Rev. 2024-07-29
+        if self.SVS.SHOW_LAYER_EXISTS in self.system_vs:
+            dlg = qgis.gui.QgsExpressionBuilderDialog(self.derived_settings.showLyr, self.derived_settings.showLyr.displayExpression())
+            dlg.setWindowTitle(MY_DICT.tr('edit_display_exp_dlg_title', self.derived_settings.showLyr.name()))
             exec_result = dlg.exec()
             if exec_result:
-                # expressionBuilder ➜ https://api.qgis.org/api/classQgsExpressionBuilderWidget.html
                 if dlg.expressionBuilder().isExpressionValid():
-                    self.ds.showLyr.setDisplayExpression(dlg.expressionText())
-                    self.push_messages(success_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} valid and used as DisplayExpression for Show-Layer {apos}{1}{apos}"),dlg.expressionText(), self.ds.showLyr.name()))
+                    self.derived_settings.showLyr.setDisplayExpression(dlg.expressionText())
+                    self.dlg_append_log_message('SUCCESS', MY_DICT.tr('display_exp_valid', self.derived_settings.showLyr.name()))
+                    # dialog-refresh is done by trigger
                 else:
-                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Expression {apos}{0}{apos} invalid and not used as DisplayExpression for Show-Layer {apos}{1}{apos}, please check syntax!"),dlg.expressionText(), self.ds.showLyr.name()))
-        else:
-            # should not happen, because QPushButton disabled
-            self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "No Show-Layer defined yet"))
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('display_exp_invalid', self.derived_settings.showLyr.name()))
 
-    def s_measure_edited(self, measure: float) -> None:
-        """Slot for valueChanged-Signal of the QDoubleSpinBox for measure, changed via user-input or spin-Buttons
-        .. Note::
-            Range of the spinbox is set to 0 ... length of the snapped geometry
-        :param measure: changed widget-value
+    def s_n_abs_edited(self, stationing: float) -> None:
+        """Slot for valueChanged-Signal of the QDoubleSpinBox for stationing-n, changed via user-input or spin-Buttons
+        create or move point on selected reference-feature via numerical editing
+        affects self.session_data.measure_feature
+        refreshes dialog and canvas-grafics
+        :param stationing: changed widget-value
         """
-        # Rev. 2023-05-03
-
-        if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
-            self.my_dialogue.dspbx_measure.setSingleStep(10)
-        elif QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-            self.my_dialogue.dspbx_measure.setSingleStep(100)
-        elif QtWidgets.QApplication.keyboardModifiers() == (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier):
-            self.my_dialogue.dspbx_measure.setSingleStep(1000)
-        else:
-            self.my_dialogue.dspbx_measure.setSingleStep(1)
-
-        if self.cf.reference_layer_defined and self.cf.measure_completed:
-            ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                ref_feature_geom = ref_feature.geometry()
-                # Spinbox-Value > length of the geometry ?
-                # Should never happen, because the range is set to line-length
-                self.rs.current_measure = max(0, min(measure, ref_feature_geom.length()))
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                self.draw_reference_geom(self.rs.snapped_ref_fid)
-                self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-    def s_measure_fract_edited(self, measure_fract: float) -> None:
-        """Slot for valueChanged-Signal of the QDoubleSpinBox for measure, changed via user-input or spin-Buttons
-        :param measure_fract: changed widget-value, 0...1
-        """
-        # Rev. 2023-05-03
-        if self.cf.measure_completed:
-            ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                measure_fract = max(0, min(measure_fract, 1))
-                ref_feature_geom = ref_feature.geometry()
-                self.rs.current_measure = measure_fract * ref_feature_geom.length()
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                self.draw_reference_geom(self.rs.snapped_ref_fid)
-                self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-    def pan_to_measure(self, ref_fid: int, measure: float):
-        """pans canvas-extent to measured point
-        :param ref_fid: FID of selected reference-line
-        :param measure: measure along reference-line
-        """
-        if self.cf.reference_layer_defined:
-            ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                ref_feature_geom = ref_feature.geometry()
-                projected_point = ref_feature_geom.interpolate(measure)
-                if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                    projected_point.transform(qgis.core.QgsCoordinateTransform(self.ds.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
-
-                if projected_point:
-                    self.iface.mapCanvas().setCenter(projected_point.asPoint())
-                    self.iface.mapCanvas().refresh()
-
-    def draw_edit_point(self, ref_fid: int, measure: float):
-        """draw vm_pt_edit
-        :param ref_fid: FID of selected reference-line
-        :param measure: measure along reference-line"""
-        # Rev. 2023-06-03
-        if self.cf.reference_layer_defined:
-            ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                ref_feature_geom = ref_feature.geometry()
-                projected_point = ref_feature_geom.interpolate(measure)
-                if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                    projected_point.transform(qgis.core.QgsCoordinateTransform(self.ds.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
-                if projected_point:
-                    self.vm_pt_edit.setCenter(projected_point.asPoint())
-                    self.vm_pt_edit.show()
-
-    def draw_measured_point(self, ref_fid: int, measure: float):
-        """helper-function which shows vm_pt_measure and the reference-line-rubber-band
-        recalculates and refreshes some widgets in dialog
-        :param ref_fid: FID of selected reference-line
-        :param measure: measure along reference-line
-        """
-        # Rev. 2023-05-03
-        if self.cf.reference_layer_defined:
-            ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                ref_feature_geom = ref_feature.geometry()
-                projected_point = ref_feature_geom.interpolate(measure)
-                if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                    projected_point.transform(qgis.core.QgsCoordinateTransform(self.ds.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
-
-                if projected_point:
-                    self.vm_pt_measure.setCenter(projected_point.asPoint())
-                    self.vm_pt_measure.show()
-
-    def draw_reference_geom(self, ref_fid: int):
-        """draw the referenced line-geometry self.rb_ref
-        :param ref_fid: FID of selected reference-line
-        """
-        if self.cf.reference_layer_defined:
-            ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                self.rb_ref.setToGeometry(ref_feature.geometry(), self.ds.refLyr)
-                self.rb_ref.show()
+        # Rev. 2024-07-29
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        self.session_data.measure_feature = None
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            if self.session_data.current_ref_fid is not None:
+                ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=self.session_data.current_ref_fid)
+                if ref_feature:
+                    if ref_feature.hasGeometry():
+                        pol = PoLFeature()
+                        pol.set_ref_fid(self.derived_settings.refLyr, ref_feature.id())
+                        pol.recalc_by_stationing(stationing, 'Nabs')
+                        if pol.is_valid:
+                            self.session_data.measure_feature = pol
+                            self.tool_draw_and_refresh_session_data(['sn', 'en', 'rfl'])
+                            self.sys_set_tool_mode('pausing')
+                        else:
+                            self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+                    else:
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
             else:
-                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with fid {apos}{0}{apos} not found, not valid or without geometry"),ref_fid))
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_reference_feature_selected'))
+        else:
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('reference_layer_missing'))
 
-    def dlg_show_measure(self, ref_fid: int, measure: float):
-        """refresh snap-coords and measure-results in dialogue
-        :param ref_fid: FID of selected reference-line
-        :param measure: measure along reference-line"""
-        # Rev. 2023-06-03
-        if self.my_dialogue and self.cf.reference_layer_defined:
-            ref_feature = self.ds.refLyr.getFeature(ref_fid)
-            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, ref_feature.id())
-
-                projected_point = ref_feature.geometry().interpolate(measure)
-
-                if not projected_point.isNull():
-                    if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                        projected_point.transform(qgis.core.QgsCoordinateTransform(self.ds.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
-
-                    self.my_dialogue.dspbx_measure.setRange(0, ref_feature.geometry().length())
-                    self.show_measure_in_dialogue(measure)
-
-                    if ref_feature.geometry().length() > 0:
-                        # prevent "ZeroDivisionError: float division by zero"
-                        self.show_measure_fract_in_dialogue(measure / ref_feature.geometry().length())
-
-                    # map and snap-coords are the same
-                    self.show_snap_coords_in_dialogue(projected_point)
-                    self.dlg_refresh_measure_section()
-                else:
-                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Point with measure {0} on reference-line with fid {apos}{1}{apos} could not be calculated, check values..."),measure, ref_fid))
-
-    def s_change_data_layer_measure_field(self) -> None:
-        """change measure-field of Data-Layer in QComboBox"""
-        # Rev. 2023-05-03
-        self.rs.selected_pks = []
-        self.rs.edit_pk = None
-        self.ss.dataLyrMeasureFieldName = None
-        measure_field = self.my_dialogue.qcbn_data_layer_measure_field.currentData()
-        if measure_field:
-            self.ss.dataLyrMeasureFieldName = measure_field.name()
-
-        self.check_settings()
-        self.refresh_data_layer_actions()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
-
-    def s_change_show_layer_back_reference_field(self) -> None:
-        """change Back-Reference-Field of Show-Layer in QComboBox"""
-        # Rev. 2023-05-03
-        self.ss.showLyrBackReferenceFieldName = None
-        back_ref_field = self.my_dialogue.qcbn_show_layer_back_reference_field.currentData()
-        if back_ref_field:
-            self.ss.showLyrBackReferenceFieldName = back_ref_field.name()
-        self.check_settings()
-        self.refresh_show_layer_actions()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
-
-    def s_change_data_layer_id_field(self) -> None:
-        """change Reference-id-field of Data-Layer-PK-Field in QComboBox"""
-        # Rev. 2023-05-03
-        self.rs.selected_pks = []
-        self.rs.edit_pk = None
-        self.ss.dataLyrIdFieldName = None
-        id_field = self.my_dialogue.qcbn_data_layer_id_field.currentData()
-        if id_field:
-            self.ss.dataLyrIdFieldName = id_field.name()
-
-        self.check_settings()
-        self.refresh_data_layer_actions()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
-
-    def s_change_data_layer_reference_field(self) -> None:
-        """change Reference-id-field of Data-Layer-Reference-field in QComboBox"""
-        # Rev. 2023-05-03
-        self.rs.selected_pks = []
-        self.rs.edit_pk = None
-        self.ss.dataLyrReferenceFieldName = None
-        if self.ss.dataLyrId:
-            ref_id_field = self.my_dialogue.qcbn_data_layer_reference_field.currentData()
-            if ref_id_field:
-                self.ss.dataLyrReferenceFieldName = ref_id_field.name()
-
-        self.check_settings()
-        self.refresh_data_layer_actions()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
-
-    def s_change_reference_layer(self) -> None:
-        """change Reference-Layer in QComboBox"""
-        # Rev. 2023-05-03
-        self.rs.selected_pks = []
-        self.rs.edit_pk = None
-        self.ss.refLyrId = None
-        self.ss.refLyrIdFieldName = None
-        self.ss.dataLyrId = None
-        self.ss.dataLyrIdFieldName = None
-        self.ss.dataLyrReferenceFieldName = None
-        self.ss.dataLyrMeasureFieldName = None
-        self.ss.showLyrId = None
-        self.ss.showLyrBackReferenceFieldName = None
-        reference_layer = self.my_dialogue.qcbn_reference_layer.currentData()
-        self.connect_reference_layer(reference_layer)
-        self.check_settings()
-        self.dlg_refresh_reference_layer_section()
-        self.dlg_refresh_measure_section()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
-
-    def dlg_refresh_edit_section(self):
-        """refreshes the edit-section in dialog"""
-        # Rev. 2023-05-10
-        if self.my_dialogue:
-            self.my_dialogue.pbtn_insert_feature.setEnabled(self.cf.insert_enabled)
-            self.my_dialogue.pbtn_update_feature.setEnabled(self.cf.update_enabled and self.rs.edit_pk is not None)
-            self.my_dialogue.pbtn_delete_feature.setEnabled(self.cf.delete_enabled and self.rs.edit_pk is not None)
-            if self.rs.edit_pk is not None:
-                if not self.check_data_feature(self.rs.edit_pk,False):
-                    self.rs.edit_pk = None
-                    self.my_dialogue.le_edit_data_pk.clear()
-
-    def connect_reference_layer(self, reference_layer) -> None:
-        """prepares Reference-Layer:
-        sets self.ss.refLyrId
-        connects signals
-        configures canvas-snap-settings
+    def s_m_abs_edited(self, stationing_m: float) -> None:
+        """Slot for valueChanged-Signal of the QDoubleSpinBox for stationing_m,
+        Conditions:
+        reference-layer is m-enabled
+        referenced-geometry ST_IsValidTrajectory (single-parted, ascending M-values)
+        changed via user-input or spin-Buttons
+        :param stationing_m: changed widget-value
         """
-        # Rev. 2023-05-03
+        # Rev. 2024-08-05
 
-        # disconnect all previously connected Reference-Layer
-        self.disconnect_reference_layers()
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        self.session_data.measure_feature = None
+        if (self.SVS.REFERENCE_LAYER_USABLE | self.SVS.REFERENCE_LAYER_M_ENABLED) in self.system_vs:
+            if self.session_data.current_ref_fid is not None:
+                ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=self.session_data.current_ref_fid)
+                if ref_feature:
+                    if ref_feature.hasGeometry():
+                        pol = PoLFeature()
+                        pol.set_ref_fid(self.derived_settings.refLyr, ref_feature.id())
+                        pol.recalc_by_stationing(stationing_m, 'Mabs')
 
-        prev_refLyrId = self.ss.refLyrId
+                        if pol.is_valid:
+                            self.session_data.measure_feature = pol
+                            self.tool_draw_and_refresh_session_data(['sn', 'en', 'rfl'])
+                            self.sys_set_tool_mode('pausing')
+                        else:
+                            self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+                    else:
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_reference_feature_selected'))
+        else:
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('m_reference_layer_missing'))
 
-        self.ss.refLyrId = None
+    def s_n_fract_edited(self, stationing_n_perc: float) -> None:
+        """Slot for valueChanged-Signal of the QDoubleSpinBox for stationing-n-from (fract, percentage 0...100), changed via user-input or spin-Buttons
+        create or move point on selected reference-feature via numerical editing
+        affects self.session_data.measure_feature
+        refreshes dialog and canvas-grafics
+        :param stationing_n_perc: changed widget-value in percent
+        """
+        # Rev. 2024-08-05
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        self.session_data.measure_feature = None
+        stationing_n_fract = stationing_n_perc / 100
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            # current selected reference-feature:
+            if self.session_data.current_ref_fid is not None:
+                ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=self.session_data.current_ref_fid)
+                if ref_feature:
+                    if ref_feature.hasGeometry():
+                        pol = PoLFeature()
+                        pol.set_ref_fid(self.derived_settings.refLyr, ref_feature.id())
+                        pol.recalc_by_stationing(stationing_n_fract, 'Nfract')
+                        if pol.is_valid:
+                            self.session_data.measure_feature = pol
+                            self.tool_draw_and_refresh_session_data(['sn', 'en', 'rfl'])
+                            self.sys_set_tool_mode('pausing')
+                        else:
+                            self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+                    else:
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_reference_feature_selected'))
+        else:
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('reference_layer_missing'))
+
+    def s_m_fract_edited(self, stationing_m_perc: float) -> None:
+        """Slot for valueChanged-Signal of the QDoubleSpinBox for stationing_m_fract (percentage),
+        Conditions:
+        reference-layer is m-enabled
+        self.session_data.measure_feature.pol exists
+        referenced-geometry ST_IsValidTrajectory (single-parted, ascending M-values)
+        changed via user-input or spin-Buttons
+        :param stationing_m_perc: changed widget-value in percent
+        """
+        # Rev. 2024-08-05
+        self.cvs_hide_markers()
+        self.dlg_clear_measurements()
+        self.session_data.measure_feature = None
+        stationing_m_perc = max(0, min(100, stationing_m_perc))
+        stationing_m_fract = stationing_m_perc / 100
+        if (self.SVS.REFERENCE_LAYER_USABLE | self.SVS.REFERENCE_LAYER_M_ENABLED) in self.system_vs:
+            if self.session_data.current_ref_fid is not None:
+                ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=self.session_data.current_ref_fid)
+                if ref_feature:
+                    if ref_feature.hasGeometry():
+                        pol = PoLFeature()
+                        pol.set_ref_fid(self.derived_settings.refLyr, ref_feature.id())
+                        pol.recalc_by_stationing(stationing_m_fract, 'Mfract')
+                        if pol.is_valid:
+                            self.session_data.measure_feature = pol
+                            self.tool_draw_and_refresh_session_data(['sn', 'en', 'rfl'])
+                            self.sys_set_tool_mode('pausing')
+                        else:
+                            self.dlg_append_log_message('WARNING', MY_DICT.tr('pol_recalculation_failed', pol.last_error))
+                    else:
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
+                else:
+                    self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_reference_feature_selected'))
+        else:
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('m_reference_layer_missing'))
+
+    def tool_draw_and_refresh_session_data(self, draw_markers: list = None, extent_markers: list = None, extent_mode: str = None):
+        """helper-function
+        draws self.session_data.measure_feature
+        refreshes measurements for self.session_data.measure_feature
+        :param draw_markers: combination of marker-types
+        :param extent_markers: combination of marker-types, optional zoom to specific markers
+        :param extent_mode: zoom/pan
+        """
+        # Rev. 2024-08-05
+        if not draw_markers:
+            draw_markers = []
+
+        if not extent_markers:
+            extent_markers = []
+
+        self.cvs_hide_markers(draw_markers)
+        self.dlg_clear_measurements()
+
+        if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+            self.dlg_refresh_measurements(self.session_data.measure_feature)
+            self.cvs_draw_feature(self.session_data.measure_feature, draw_markers, extent_markers, extent_mode)
+
+        self.dlg_refresh_measure_section()
+
+    def cvs_draw_feature(self, pol_feature: PoLFeature, draw_markers: list = None, extent_markers: list = None, extent_mode: str = None):
+        """draws complete pol_feature: stationing points, segment, reference-line
+         usually called with pol_feature == self.session_data.edit_feature or self.session_data.measure_feature
+        :param pol_feature: selected and parsed PoL-feature
+        :param draw_markers: combination of marker-types, all but cache-markers supported here
+        :param extent_markers: combination of marker-types, optional zoom to specific markers
+        :param extent_mode: zoom/pan
+        """
+        # Rev. 2024-08-05
+        if not draw_markers:
+            draw_markers = []
+
+        if not extent_markers:
+            extent_markers = []
+
+        # pre-hide all draw_markers
+        self.cvs_hide_markers(draw_markers)
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            # mostly called via self.session_data.edit_feature, which could be None
+            if pol_feature and pol_feature.is_valid:
+
+                if pol_feature.ref_fid:
+                    x_coords = []
+                    y_coords = []
+                    reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=pol_feature.ref_fid)
+                    if reference_geom:
+
+                        if 'sn' in draw_markers or 'en' in draw_markers or 'sn' in extent_markers or 'en' in extent_markers:
+
+                            projected_point_n = reference_geom.interpolate(pol_feature.snap_n_abs)
+                            if not projected_point_n.isEmpty():
+                                projected_point_n.transform(qgis.core.QgsCoordinateTransform(self.derived_settings.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
+
+                                if 'sn' in draw_markers:
+                                    self.vm_sn.setCenter(projected_point_n.asPoint())
+                                    self.vm_sn.show()
+
+                                if 'en' in draw_markers:
+                                    self.vm_en.setCenter(projected_point_n.asPoint())
+                                    self.vm_en.show()
+
+                                if 'sn' in extent_markers or 'en' in extent_markers:
+                                    x_coords.append(projected_point_n.asPoint().x())
+                                    y_coords.append(projected_point_n.asPoint().y())
+                            else:
+                                self.dlg_append_log_message('INFO', MY_DICT.tr('pol_recalculation_failed'))
+
+                        # Show and zoom reference-feature only in combination with checked data-feature n/m
+                        if 'rfl' in draw_markers:
+                            self.rb_rfl.setToGeometry(reference_geom, self.derived_settings.refLyr)
+                            self.rb_rfl.show()
+
+                        # zoom/pan tor reference-line !?
+                        if 'rfl' in extent_markers:
+                            extent = reference_geom.boundingBox()
+                            tr = qgis.core.QgsCoordinateTransform(self.derived_settings.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance())
+                            extent = tr.transformBoundingBox(extent)
+
+                            x_coords.append(extent.xMinimum())
+                            x_coords.append(extent.xMaximum())
+                            y_coords.append(extent.yMinimum())
+                            y_coords.append(extent.yMaximum())
+
+                        if extent_mode and extent_markers:
+                            # coordinates already transformed to canvas-crs
+                            self.cvs_zoom_to_coords(x_coords, y_coords, extent_mode)
+                    else:
+                        self.dlg_append_log_message('WARNING', error_msg)
+            else:
+                pass
+        else:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('reference_or_data_layer_missing'))
+
+    def cvs_draw_po_pro_feature(self, po_pro_feature: PoLFeature, draw_markers: list = None, extent_markers: list = None, extent_mode: str = None):
+        """shows stationing points, cached points, segments, reference-line for cached post-processing-feature
+        :param po_pro_feature: current data-feature, self.session_data.po_pro_feature
+        :param draw_markers: combination of draw makers, all types supported here, included cache-markers
+        :param extent_markers: optional zoom to combination of extent-markers
+        :param extent_mode: zoom/pan
+        """
+        # Rev. 2024-08-05
+        if not draw_markers:
+            draw_markers = []
+
+        if not extent_markers:
+            extent_markers = []
+
+        # pre-hide all draw_markers
+        self.cvs_hide_markers(draw_markers)
+        self.tool_check_po_pro_data_cache()
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            # called via self.session_data.po_pro_feature, which could be none
+            if po_pro_feature:
+                if po_pro_feature.data_fid in self.session_data.po_pro_data_cache:
+
+                    x_coords = []
+                    y_coords = []
+
+                    po_pro_cached_feature = self.session_data.po_pro_data_cache[self.session_data.po_pro_feature.data_fid]
+
+                    reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=po_pro_cached_feature.ref_fid)
+
+                    if reference_geom:
+                        data_feature, error_msg = self.tool_get_data_feature(data_fid=po_pro_cached_feature.data_fid)
+
+                        if data_feature:
+
+                            if 'sn' in draw_markers or 'en' in draw_markers or 'sn' in extent_markers or 'en' in extent_markers:
+
+                                projected_point_n = reference_geom.interpolate(po_pro_feature.snap_n_abs)
+                                if not projected_point_n.isEmpty():
+                                    projected_point_n.transform(qgis.core.QgsCoordinateTransform(self.derived_settings.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
+
+                                    if 'sn' in draw_markers:
+                                        self.vm_sn.setCenter(projected_point_n.asPoint())
+                                        self.vm_sn.show()
+
+                                    if 'en' in draw_markers:
+                                        self.vm_en.setCenter(projected_point_n.asPoint())
+                                        self.vm_en.show()
+
+                                    if 'sn' in extent_markers or 'en' in extent_markers:
+                                        x_coords.append(projected_point_n.asPoint().x())
+                                        y_coords.append(projected_point_n.asPoint().y())
+
+                            cached_geom = self.session_data.po_pro_reference_cache[po_pro_cached_feature.ref_fid]
+
+                            if 'cn' in draw_markers or 'cn' in extent_markers:
+                                projected_point_n = cached_geom.interpolate(po_pro_cached_feature.snap_n_abs)
+                                if not projected_point_n.isEmpty():
+                                    projected_point_n.transform(qgis.core.QgsCoordinateTransform(self.derived_settings.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance()))
+
+                                    if 'cn' in draw_markers:
+                                        self.vm_pt_cn.setCenter(projected_point_n.asPoint())
+                                        self.vm_pt_cn.show()
+
+                                    if 'cn' in extent_markers:
+                                        x_coords.append(projected_point_n.asPoint().x())
+                                        y_coords.append(projected_point_n.asPoint().y())
+
+                            # Show and zoom reference-feature only in combination with checked data-feature n/m
+                            if 'rfl' in draw_markers:
+                                self.rb_rfl.setToGeometry(reference_geom, self.derived_settings.refLyr)
+                                self.rb_rfl.show()
+
+                            # zoom/pan tor reference-line !?
+                            if 'rfl' in extent_markers:
+                                extent = reference_geom.boundingBox()
+                                tr = qgis.core.QgsCoordinateTransform(self.derived_settings.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance())
+                                extent = tr.transformBoundingBox(extent)
+
+                                x_coords.append(extent.xMinimum())
+                                x_coords.append(extent.xMaximum())
+                                y_coords.append(extent.yMinimum())
+                                y_coords.append(extent.yMaximum())
+
+                            if 'crfl' in draw_markers:
+                                self.rb_crfl.setToGeometry(cached_geom, self.derived_settings.refLyr)
+                                self.rb_crfl.show()
+
+                            if 'crfl' in extent_markers:
+                                extent = cached_geom.boundingBox()
+                                tr = qgis.core.QgsCoordinateTransform(self.derived_settings.refLyr.crs(), self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance())
+                                extent = tr.transformBoundingBox(extent)
+
+                                x_coords.append(extent.xMinimum())
+                                x_coords.append(extent.xMaximum())
+                                y_coords.append(extent.yMinimum())
+                                y_coords.append(extent.yMaximum())
+
+                            if extent_mode and extent_markers:
+                                # coordinates already transformed to canvas-crs
+                                self.cvs_zoom_to_coords(x_coords, y_coords, extent_mode)
+
+                        else:
+                            self.dlg_append_log_message('WARNING', error_msg)
+                    else:
+                        self.dlg_append_log_message('WARNING', error_msg)
+                else:
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('po_pro_data_feature_not_in_cache', po_pro_feature.data_fid))
+            else:
+                pass
+        else:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('reference_or_data_layer_missing'))
+
+    def cvs_draw_reference_geom(self, reference_geom: qgis.core.QgsGeometry = None, ref_feature: qgis.core.QgsFeature = None, ref_id: int | str = None, ref_fid: int = None, data_fid: int = None, zoom_to_feature: bool = False):
+        """hide/draw(highlight) and optionally zoom to reference-line
+        :param reference_geom: geometry queryable via...
+        :param ref_feature:
+        :param ref_id:
+        :param ref_fid:
+        :param data_fid:
+        :param zoom_to_feature:
+        """
+        # Rev. 2024-08-05
+        self.rb_rfl.hide()
+
+        reference_geom, error_msg = self.tool_get_reference_geom(reference_geom, ref_feature, ref_fid, ref_id, data_fid)
+
+        if reference_geom:
+            if zoom_to_feature:
+                extent = reference_geom.boundingBox()
+                source_crs = self.derived_settings.refLyr.crs()
+                target_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+                tr = qgis.core.QgsCoordinateTransform(source_crs, target_crs, qgis.core.QgsProject.instance())
+                extent = tr.transformBoundingBox(extent)
+                if extent.area() > 0:
+                    self.iface.mapCanvas().setExtent(extent)
+                    self.iface.mapCanvas().zoomByFactor(1.3)
+                else:
+                    # hardly possible: Linestring with all points identical
+                    self.iface.mapCanvas().setCenter(extent.center())
+
+                self.iface.mapCanvas().refresh()
+
+            self.rb_rfl.setToGeometry(reference_geom, self.derived_settings.refLyr)
+            self.rb_rfl.show()
+        else:
+            # self.dlg_append_log_message('WARNING', error_msg)do
+            # no log because often called with new inserted and yet incomplete features without reference
+            pass
+
+    def ssc_data_layer_stationing_field(self) -> None:
+        """change stationing_n-field of Data-Layer in QComboBox"""
+        # Rev. 2024-08-06
+        self.stored_settings.dataLyrStationingFieldName = None
+        stationing_field = self.my_dialog.qcbn_data_layer_stationing_field.currentData()
+        if stationing_field:
+            self.stored_settings.dataLyrStationingFieldName = stationing_field.name()
+
+        self.sys_check_settings()
+        self.tool_restart_session()
+
+    def scc_lr_mode(self) -> None:
+        """changes lr_mode, type of stationing-storage, in QComboBox,
+        stored in settings
+        affects stationings on update/insert by this plugin
+        """
+        # Rev. 2024-08-06
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            lr_mode = self.my_dialog.qcb_lr_mode.currentData()
+            if lr_mode == 'Mabs' and not self.SVS.REFERENCE_LAYER_M_ENABLED in self.system_vs:
+                # double check: this option only exists, if the layer is M-enabled
+                lr_mode = 'Nabs'
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('auto_switched_lr_mode'))
+
+            self.stored_settings.lrMode = lr_mode
+        # the change of the lrMode makes the previous created/selected showLyr no more suitable => disconnect
+        self.stored_settings.showLyrId = None
+        self.stored_settings.showLyrBackReferenceFieldName = None
+        self.gui_remove_layer_actions()
+        self.sys_check_settings()
+
+        self.dlg_refresh_measure_section()
+        self.dlg_refresh_qcbn_reference_feature()
+        # refresh the list of selectable show-layers
+        self.dlg_refresh_layer_settings_section()
+        # changed lr_mode requires validation
+        self.dlg_refresh_feature_selection_section()
+        self.dlg_refresh_po_pro_section()
+        self.cvs_hide_markers()
+
+    def scc_storage_precision(self) -> None:
+        """changes storage-precision of Data-Layer in QComboBox,
+        stored in settings
+        affects stationings on update/insert by this plugin and display-preciosion of some table-widgets
+        """
+        # Rev. 2024-08-06
+        self.stored_settings.storagePrecision = self.my_dialog.qcb_storage_precision.currentData()
+        self.dlg_apply_storage_precision()
+
+    def ssc_show_layer_back_reference_field(self) -> None:
+        """change Back-Reference-Field of N-Show-Layer in QComboBox"""
+        # Rev. 2024-08-06
+        self.stored_settings.showLyrBackReferenceFieldName = None
+        back_ref_field = self.my_dialog.qcbn_show_layer_back_reference_field.currentData()
+        if back_ref_field:
+            self.stored_settings.showLyrBackReferenceFieldName = back_ref_field.name()
+        self.sys_check_settings()
+        self.tool_restart_session()
+
+    def ssc_data_layer_id_field(self) -> None:
+        """change ID-field for Data-Layer in QComboBox"""
+        # Rev. 2024-08-06
+        self.stored_settings.dataLyrIdFieldName = None
+
+        id_field = self.my_dialog.qcbn_data_layer_id_field.currentData()
+        if id_field:
+            self.stored_settings.dataLyrIdFieldName = id_field.name()
+
+        self.sys_check_settings()
+        self.tool_restart_session()
+
+    def cvs_zoom_to_coords(self, x_coords: list, y_coords: list, extent_mode: str, projection: qgis.core.QgsCoordinateReferenceSystem = None):
+        """zooms to combined x_coords/y_coords
+        if the extent is very small pan to center and zoom in by 0.75
+        :param x_coords: list of x-coords, same crs
+        :param y_coords: list of y-coords, same crs
+        :param extent_mode: zoom/pan
+        :param projection: optional projection of the coordinates (f.e. refLyr), if omitted, canvas-crs is assumed
+        """
+        # Rev. 2024-08-06
+        if x_coords and y_coords:
+            x_min = min(x_coords)
+            y_min = min(y_coords)
+            x_max = max(x_coords)
+            y_max = max(y_coords)
+
+            unit, zoom_pan_tolerance, display_precision, measure_default_step = tools.MyTools.eval_crs_units(self.iface.mapCanvas().mapSettings().destinationCrs().authid())
+
+            if x_min <= x_max or y_min <= y_max:
+                extent = qgis.core.QgsRectangle(x_min, y_min, x_max, y_max)
+                if projection:
+                    tr = qgis.core.QgsCoordinateTransform(projection, self.iface.mapCanvas().mapSettings().destinationCrs(), qgis.core.QgsProject.instance())
+                    extent = tr.transformBoundingBox(extent)
+
+                if extent_mode == 'zoom':
+                    if extent.width() >= zoom_pan_tolerance and extent.height() >= zoom_pan_tolerance:
+                        self.iface.mapCanvas().setExtent(extent)
+                        self.iface.mapCanvas().zoomByFactor(1.3)
+                    else:
+                        # extent is a point => pan and zoom-in
+                        self.iface.mapCanvas().setCenter(extent.center())
+                        self.iface.mapCanvas().zoomByFactor(0.75)
+                elif extent_mode == 'pan':
+                    self.iface.mapCanvas().setCenter(extent.center())
+
+                self.iface.mapCanvas().refresh()
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_extent_calculable'))
+        else:
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('no_extent_calculable'))
+
+    def cvs_check_marker_visibility(self, check_markers: list) -> bool:
+        """checks the visibility of check_markers
+        used for toggle-on/off of points/segments
+        :param check_markers: marker-types
+        :returns: True => all markers visible False => at least on not visible
+        """
+        # Rev. 2024-08-06
+        all_markers = {
+            'sn': self.vm_sn,  # stationing point from
+            'en': self.vm_en,  # edit point from
+            'rfl': self.rb_rfl,  # Reference-Line
+            'cn': self.vm_pt_cn,  # cached point from
+            'crfl': self.rb_crfl  # cached Reference-Line
+        }
+
+        for check_marker in check_markers:
+            if check_marker in all_markers:
+                if not all_markers[check_marker].isVisible():
+                    # first hidden marker => return
+                    return False
+            else:
+                raise KeyError(f"marker '{check_marker}' not supported")
+
+        # all check_marker visible
+        return True
+
+    def cvs_hide_markers(self, hide_markers: list = None):
+        """hide temporary graphics
+        :param hide_markers: combination of marker-types
+        if empty: hide all markers
+        """
+        # Rev. 2024-08-06
+        if not hide_markers:
+            hide_markers = ['sn', 'rfl', 'en', 'cn', 'crfl', 'cuca', 'cacu']
+
+        self.rb_selection_rect.hide()
+
+        if 'sn' in hide_markers:
+            self.vm_sn.hide()
+
+        if 'rfl' in hide_markers:
+            self.rb_rfl.hide()
+
+        if 'en' in hide_markers:
+            self.vm_en.hide()
+
+        if 'cn' in hide_markers:
+            self.vm_pt_cn.hide()
+
+        if 'crfl' in hide_markers:
+            self.rb_crfl.hide()
+
+        if 'cuca' in hide_markers:
+            self.rb_rfl_diff_cu.hide()
+
+        if 'cacu' in hide_markers:
+            self.rb_rfl_diff_ca.hide()
+
+    def ssc_data_layer_reference_field(self) -> None:
+        """change Reference-id-field of Data-Layer-Reference-field in QComboBox
+        unsets some follow-up-settings, which possibly don't fit anymore and have to be reconfigured by the user
+        """
+        # Rev. 2024-08-06
+        self.stored_settings.dataLyrReferenceFieldName = None
+        ref_id_field = self.my_dialog.qcbn_data_layer_reference_field.currentData()
+        if ref_id_field:
+            self.stored_settings.dataLyrReferenceFieldName = ref_id_field.name()
+
+        self.sys_check_settings()
+        self.tool_restart_session()
+
+    def tool_restart_session(self):
+        """restart session after configuration changes"""
+        # Rev. 2024-08-06
+        self.session_data = SessionData()
+
+        # refresh dialog
+        self.dlg_clear_measurements()
+        self.dlg_refresh_measure_section()
+        self.dlg_refresh_feature_selection_section()
+        self.dlg_refresh_layer_settings_section()
+        self.dlg_refresh_po_pro_section()
+        self.dlg_refresh_qcbn_reference_feature()
+        self.cvs_hide_markers()
+
+    def ssc_reference_layer(self) -> None:
+        """change Reference-Layer in QComboBox
+        side-effect: unsets nearly all follow-up-settings, which possibly don't fit anymore and have to be reconfigured by the user"""
+        # Rev. 2024-08-06
+        self.stored_settings.refLyrId = None
+        selected_reference_layer = self.my_dialog.qcbn_reference_layer.currentData()
+        if selected_reference_layer:
+            self.stored_settings.refLyrId = selected_reference_layer.id()
+
+        # re-create self.system_vs and self.derived_settings
+        self.sys_check_settings()
+
+        self.tool_restart_session()
+
+        self.dlg_apply_ref_lyr_crs()
+
+    def sys_connect_reference_layer(self, reference_layer_id: str) -> None:
+        """checks and prepares Reference-Layer:
+            - re-sets self.stored_settings.refLyrId and self.derived_settings.refLyr
+            - connects signals to slots
+            - configures and activates canvas-snap-settings for this layer
+            - sets some self.session_data dependend on layer-projection (measure_unit, measure_default_step)
+        1:1 subroutine called by sys_check_settings
+        :param reference_layer_id: if '', None or layer not found or wrong type... the first suitable linestring-layer in project will be selected
+        """
+        # Rev. 2024-08-06
+
+        self.stored_settings.refLyrId = None
+        self.derived_settings.refLyr = None
+
+        # Note: Plugin accepts Multi-Layer-Types, but no Multi-Geometry-Features in these Layers
+        linestring_wkb_types = [
+            qgis.core.QgsWkbTypes.LineString25D,
+            qgis.core.QgsWkbTypes.MultiLineString25D,
+            qgis.core.QgsWkbTypes.LineString,
+            qgis.core.QgsWkbTypes.MultiLineString,
+            qgis.core.QgsWkbTypes.LineStringZ,
+            qgis.core.QgsWkbTypes.MultiLineStringZ,
+            qgis.core.QgsWkbTypes.LineStringM,
+            qgis.core.QgsWkbTypes.MultiLineStringM,
+            qgis.core.QgsWkbTypes.LineStringZM,
+            qgis.core.QgsWkbTypes.MultiLineStringZM,
+        ]
+
+        # Note: mapLayer can be called with every string or None without exception
+        reference_layer = qgis.core.QgsProject.instance().mapLayer(reference_layer_id)
+
+        # convenience for the basic requisite:
+        # if not set so far or not suiitable: take the topmost linestring-layer
+        # 'virtual' check to exclude Plugins schow-layer
+        if not reference_layer or not (reference_layer.isValid() and reference_layer.type() == qgis.core.QgsMapLayerType.VectorLayer and reference_layer.dataProvider().name() != 'virtual' and reference_layer.dataProvider().wkbType() in linestring_wkb_types):
+            for cl in qgis.core.QgsProject.instance().mapLayers().values():
+                if cl.isValid() and cl.type() == qgis.core.QgsMapLayerType.VectorLayer and cl.dataProvider().name() != 'virtual' and cl.dataProvider().wkbType() in linestring_wkb_types:
+                    reference_layer = cl
+                    break
+
         if reference_layer:
-            self.ss.refLyrId = reference_layer.id()
-            # snapping settings ar stored in canvas, not in layer
-            my_snap_config = self.iface.mapCanvas().snappingUtils().config()
+            self.system_vs |= self.SVS.REFERENCE_LAYER_EXISTS
+
+            if reference_layer.crs().isValid():
+                self.system_vs |= self.SVS.REFERENCE_LAYER_HAS_VALID_CRS
+
+                linestring_m_types = [
+                    qgis.core.QgsWkbTypes.LineStringM,
+                    qgis.core.QgsWkbTypes.MultiLineStringM,
+                    qgis.core.QgsWkbTypes.LineStringZM,
+                    qgis.core.QgsWkbTypes.MultiLineStringZM,
+                ]
+
+                linestring_z_types = [
+                    qgis.core.QgsWkbTypes.LineStringZ,
+                    qgis.core.QgsWkbTypes.MultiLineStringZ,
+                    qgis.core.QgsWkbTypes.LineStringZM,
+                    qgis.core.QgsWkbTypes.MultiLineStringZM,
+                ]
+
+                if reference_layer.type() == qgis.core.QgsMapLayerType.VectorLayer and reference_layer.dataProvider().wkbType() in linestring_wkb_types:
+
+                    self.system_vs |= self.SVS.REFERENCE_LAYER_IS_LINESTRING
+
+                    if reference_layer.dataProvider().wkbType() in linestring_m_types:
+                        self.system_vs |= self.SVS.REFERENCE_LAYER_M_ENABLED
+                    elif self.stored_settings.lrMode == 'Mabs':
+                        self.stored_settings.lrMode = 'Nabs'
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('auto_switched_lr_mode'))
+
+                    if reference_layer.dataProvider().wkbType() in linestring_z_types:
+                        self.system_vs |= self.SVS.REFERENCE_LAYER_Z_ENABLED
+
+                    self.stored_settings.refLyrId = reference_layer.id()
+                    self.derived_settings.refLyr = reference_layer
+
+                    # new display-string => refresh of dialog-elements
+                    self.sys_connect_layer_slot(reference_layer, 'displayExpressionChanged', self.sys_layer_slot)
+
+                    # very often triggered, f.e. additionally on displayExpressionChanged, once for each changed character?
+                    # self.sys_connect_layer_slot(reference_layer, 'layerModified',self.sys_layer_slot)
+
+                    # new filter applied => refresh of dialog-elements
+                    self.sys_connect_layer_slot(reference_layer, 'subsetStringChanged', self.sys_layer_slot)
+
+                    # edit-session on reference-layer => initialize post-processing
+                    self.sys_connect_layer_slot(reference_layer, 'editingStarted', self.sys_layer_slot)
+
+                    # edit-session on reference-layer => finish post-processing
+                    self.sys_connect_layer_slot(reference_layer, 'afterCommitChanges', self.sys_layer_slot)
+
+                    # geometry change in reference-layer => perform post-processing
+                    self.sys_connect_layer_slot(reference_layer, 'geometryChanged', self.sys_layer_slot)
+
+                    # edit-command on reference-layer ended (feature modified/inserted/deleted) => refresh qcbn_reference_feature
+                    self.sys_connect_layer_slot(reference_layer, 'editCommandEnded', self.sys_layer_slot)
+
+                    # edit-session on reference-layer finished, features possibly modified/inserted/deleted (editCommandEnded), committed or rollbacked
+                    self.sys_connect_layer_slot(reference_layer, 'editingStopped', self.sys_layer_slot)
+
+                    self.sys_connect_layer_slot(reference_layer, 'crsChanged', self.sys_layer_slot)
+
+                    self.cvs_set_snap_config()
+
+                    self.system_vs |= self.SVS.REFERENCE_LAYER_CONNECTED
+
+                    # check data-layer-privileges
+                    if reference_layer.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.AddFeatures:
+                        self.system_vs |= self.SVS.REFERENCE_LAYER_INSERT_ENABLED
+                    if reference_layer.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.ChangeAttributeValues:
+                        self.system_vs |= self.SVS.REFERENCE_LAYER_UPDATE_ENABLED
+                    if reference_layer.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.DeleteFeatures:
+                        self.system_vs |= self.SVS.REFERENCE_LAYER_DELETE_ENABLED
+                    if reference_layer.isEditable():
+                        self.system_vs |= self.SVS.REFERENCE_LAYER_EDITABLE
+
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('ref_lyr_crs_invalid'))
+
+    def cvs_set_snap_config(self):
+        """ Configure Snapping for reference-layer
+        Note: snapping settings ar stored in project, not in layer
+        """
+        # Rev. 2024-08-26
+        if self.derived_settings.refLyr:
+            my_snap_config = qgis.core.QgsProject.instance().snappingConfig()
             # clear all previous settings
             my_snap_config.clearIndividualLayerSettings()
             # enable snapping
@@ -1694,329 +4128,584 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             # advanced: layer-wise snapping settings
             my_snap_config.setMode(qgis.core.QgsSnappingConfig.AdvancedConfiguration)
             # combination of snapping-modes
+            # 10 Pixel to Segment and LineEndpoint (latter prefered and will override Segment-Snap)
             type_flag = qgis.core.Qgis.SnappingTypes(qgis.core.Qgis.SnappingType.Segment | qgis.core.Qgis.SnappingType.LineEndpoint)
-            my_snap_config.setIndividualLayerSettings(reference_layer, qgis.core.QgsSnappingConfig.IndividualLayerSettings(enabled=True, type=type_flag, tolerance=10, units=qgis.core.QgsTolerance.UnitType.Pixels))
+            my_snap_config.setIndividualLayerSettings(self.derived_settings.refLyr, qgis.core.QgsSnappingConfig.IndividualLayerSettings(enabled=True, type=type_flag, tolerance=10, units=qgis.core.QgsTolerance.UnitType.Pixels))
             my_snap_config.setIntersectionSnapping(False)
             qgis.core.QgsProject.instance().setSnappingConfig(my_snap_config)
 
-            # second: connect to new refLyr
-            # displayExpressionChanged not triggered with configChanged
-            # afterCommitChanges ➜ refresh too, if the Reference-Layer was edited
+    def sys_connect_layer_slot(self, layer: qgis.core.QgsVectorLayer, conn_signal: str, conn_function: typing.Callable):
+        """adds a signal/slot-connection to self.signal_slot_cons (if this connection was not registered before)
+        each layer supports many signals, triggered on specific actions, some of them are usefull for the plugin layers (reference/data/show) and connected to slots, f. e. to refresh dialog-elements after inserts/updates/deletes
+        so the dialog will be refreshed by any edit-action on the features (update/insert/delete...), even if done outside plugin, f.e. by geometry-edits in reference-layer or stationing-edit in data-layer.
+        - Multiple connections of one layer to the same slot have to be avoided
+        - On change of layer or plugin-unload these signals have to be disconnected
+        => each connection is registered in self.signal_slot_cons (nested dictionary, layer_id > conn_signal > conn_function => conn_id)
+        :param layer: layer, for which the connection have to be established and registered
+        :param conn_signal: a layer has many connectable signals
+        :param conn_function: each signal can be connected to multiple functions, in this plugin its allways self.sys_layer_slot
+        """
+        # Rev. 2024-08-06
+        if not layer.id() in self.signal_slot_cons:
+            self.signal_slot_cons.setdefault(layer.id(), {})
 
-            self.rs.reference_layer_connections.append(reference_layer.configChanged.connect(self.refresh_gui))
-            self.rs.reference_layer_connections.append(reference_layer.displayExpressionChanged.connect(self.refresh_gui))
-            self.rs.reference_layer_connections.append(reference_layer.afterCommitChanges.connect(self.dlg_refresh_feature_selection_section))
-            self.rs.reference_layer_connections.append(reference_layer.afterCommitChanges.connect(self.dlg_refresh_reference_layer_section))
+        if not conn_signal in self.signal_slot_cons[layer.id()]:
+            self.signal_slot_cons[layer.id()].setdefault(conn_signal, {})
 
-            # Layer has changed ➜ check and warn if multi-xxx-layer
-            if reference_layer.id() != prev_refLyrId:
-                multi_linestring_geometry_types = [
-                    # problematic: Shape-Format doesn't distinguish between single- and multi-geometry-types
-                    # unpredictable though, how measures on multi-linestring will be located
-                    qgis.core.QgsWkbTypes.MultiLineString,
-                    qgis.core.QgsWkbTypes.MultiLineString25D,
-                    qgis.core.QgsWkbTypes.MultiLineStringM,
-                    qgis.core.QgsWkbTypes.MultiLineStringZ,
-                    qgis.core.QgsWkbTypes.MultiLineStringZM,
+        if not conn_function.__name__ in self.signal_slot_cons[layer.id()][conn_signal]:
+            signal_obj = getattr(layer, conn_signal)
 
-                ]
-                if reference_layer.dataProvider().wkbType() in multi_linestring_geometry_types:
-                    inspect_class = qgis.core.QgsWkbTypes
-                    enum_class = qgis.core.QgsWkbTypes.Type
-                    keys_by_value = {getattr(inspect_class, att_name): att_name for att_name in vars(inspect_class) if type(getattr(inspect_class, att_name)) == enum_class}
-                    wkb_label = keys_by_value[reference_layer.dataProvider().wkbType()]
-                    self.push_messages(info_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Reference-Layer {apos}{0}{apos} is of type {apos}{1}{apos}, Point-on-Line-features on multi-lines are not shown"),reference_layer.name(), wkb_label))
+            # create lamda-function which adds additional informations about the layer and the signal to the conn_function-call
 
-    def refresh_gui(self):
-        """wrapper-slot for any layer-config-change, checks the settings and refreshes GUI (dialog, layer-actions, Snapping, canvas-graphics)"""
-        # Rev. 2023-05-10
-        self.check_settings()
-        self.dlg_refresh_reference_layer_section()
-        self.dlg_refresh_measure_section()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
-        self.dlg_refresh_style_settings_section()
-        self.dlg_refresh_stored_settings_section()
-        self.connect_all_layers()
-        self.refresh_canvas_graphics()
+            # default-lambda
+            lambda_fn = lambda: conn_function(layer.id(), conn_signal)
+            if conn_signal in ['crsChanged', 'subsetStringChanged', 'displayExpressionChanged', 'editingStarted', 'editingStopped', 'editCommandEnded', 'afterCommitChanges', 'dataSourceChanged']:
+                # signals returning nothing:
+                pass
+            elif conn_signal == 'geometryChanged':
+                # signal emitted with two parameters: fid and (changed!) geometry
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#ae7dfd1c752b251a03800f34763ddc343
+                lambda_fn = lambda fid, geometry: conn_function(layer.id(), conn_signal, fid=fid, geometry=geometry)
+            elif conn_signal == 'editCommandStarted':
+                # Signal emitted when a new edit command has been started.
+                # parameter text Description for this edit command
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#a29b8775dd9808d134b7fc6da94524bb6
+                lambda_fn = lambda text: conn_function(layer.id(), conn_signal, text=text)
+            elif conn_signal == 'attributeValueChanged':
+                # signal emitted with three parameters: fid, idx (attribute index of the changed attribute) and (changed!) value
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#aabc217b0260dce5899d78704cacc32ae
+                lambda_fn = lambda fid, idx, value: conn_function(layer.id(), conn_signal, fid=fid, idx=idx, value=value)
+            elif conn_signal == 'featureAdded':
+                # signal emitted with parameter fid == id of the new feature (negative if inserted to edit-buffer, positive if edit-buffer-feature is committed)
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#ac914dd316a4bb50eb432515950583806
+                lambda_fn = lambda fid: conn_function(layer.id(), conn_signal, fid=fid)
+            elif conn_signal == 'committedFeaturesAdded':
+                # Emitted when features are added to the provider if not in transaction mode
+                # two parameters: layerId (doubled) and addedFeatures (C: QgsFeatureList Python: list of QgsFeature)
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#a069cafd8b1fa33893e930954111ed03a
+                lambda_fn = lambda layerId, addedFeatures: conn_function(layer.id(), conn_signal, layerId=layerId, addedFeatures=addedFeatures)
+            elif conn_signal == 'featuresDeleted':
+                # Emitted when features were deleted on layer or its edit-buffer before commit
+                # one parameter: fids => fids of deleted features
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#a4afb4e75ec50673f8a09cc89d8246386
+                lambda_fn = lambda fids: conn_function(layer.id(), conn_signal, fids=fids)
+            elif conn_signal == 'committedAttributeValuesChanges':
+                # Emitted when attribute value changes are saved to the provider if not in transaction mode.
+                # two parameters:
+                # layerId
+                # changedAttributesValues (QgsChangedAttributesMap, dictionary with fid as key)
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#a81baaf8b545ffdc12f37fe72d99cfc3d
+                lambda_fn = lambda layerId, changedAttributesValues: conn_function(layer.id(), conn_signal, layerId=layerId, changedAttributesValues=changedAttributesValues)
+            elif conn_signal == 'committedFeaturesRemoved':
+                # Emitted when features are deleted from the provider if not in transaction mode.
+                # two parameters:
+                # layerId
+                # deletedFeatureIds (list of ids)
+                # see https://api.qgis.org/api/classQgsVectorLayer.html#a520550b45603ed20d593b1050768bd97
+                # triggered, if so far buffered delete (handled by featuresDeleted) is committed.
+                lambda_fn = lambda layerId, deletedFeatureIds: conn_function(layer.id(), conn_signal, layerId=layerId, deletedFeatureIds=deletedFeatureIds)
+            else:
+                # lambda_fn = lambda: conn_function(layer.id(), conn_signal)
+                raise NotImplementedError(f"conn_signal '{conn_signal}' on Layer '{layer.id()}' not implemented")
 
-    def dlg_refresh_data_sections(self):
-        """wrapper-slot for any Data-Layer-change (update/insert/delete), refreshes parts of the dialog"""
-        # Rev. 2023-05-10
-        self.dlg_refresh_measure_section()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
+            conn_id = signal_obj.connect(lambda_fn)
+            self.signal_slot_cons[layer.id()][conn_signal][conn_function.__name__] = conn_id
 
-    def s_change_reference_layer_id_field(self) -> None:
-        """change Reference-Layer-join-field in QComboBox"""
-        # Rev. 2023-05-03
-        self.rs.selected_pks = []
-        self.rs.edit_pk = None
-        self.ss.refLyrIdFieldName = None
-        self.ss.dataLyrId = None
-        self.ss.dataLyrIdFieldName = None
-        self.ss.dataLyrReferenceFieldName = None
-        self.ss.dataLyrMeasureFieldName = None
-        self.ss.showLyrId = None
-        self.ss.showLyrBackReferenceFieldName = None
+    def dlg_refresh_po_pro_section(self):
+        """Refreshes qtrv_po_pro_selection TreeView
+        uses cached reference line and data-features and lists the affected features
+        from here the user can show the previous calculated positions and correct the currently stored stationings
+        """
+        # Rev. 2024-08-06
+        remove_icon = QtGui.QIcon(':icons/mIconClearTextHover.svg')
+        zoom_selected_icon = QtGui.QIcon(':icons/mIconZoom.svg')
+        zoom_ref_feature_icon = QtGui.QIcon(':icons/mIconZoom.svg')
+        identify_icon = QtGui.QIcon(':icons/mActionIdentify.svg')
+        previous_line_icon = QtGui.QIcon(':icons/previous_line.svg')
+        move_feature_icon = QtGui.QIcon(':icons/move_pol_feature.svg')
+        move_icon = QtGui.QIcon(':icons/move_pol_feature.svg')
+        delete_icon = QtGui.QIcon(':icons/mActionDeleteSelectedFeatures.svg')
 
-        reference_layer_id_field = self.my_dialogue.qcbn_reference_layer_id_field.currentData()
-        if reference_layer_id_field:
-            self.ss.refLyrIdFieldName = reference_layer_id_field.name()
-        self.check_settings()
-        self.dlg_refresh_reference_layer_section()
-        self.dlg_refresh_measure_section()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
+        # checks the cache, removes all invalid, sorts by data_fid
+        self.tool_check_po_pro_data_cache()
 
-    def s_change_data_layer(self) -> None:
+        if self.my_dialog:
+            with (QtCore.QSignalBlocker(self.my_dialog.qtrv_po_pro_selection)):
+                with QtCore.QSignalBlocker(self.my_dialog.qtrv_po_pro_selection.selectionModel()):
+                    # order settings for later restore
+                    old_indicator = self.my_dialog.qtrv_po_pro_selection.header().sortIndicatorSection()
+                    old_order = self.my_dialog.qtrv_po_pro_selection.header().sortIndicatorOrder()
+                    expanded_ref_fids = []
+
+                    # store previous expanded branches for later restore
+                    for rc in range(self.my_dialog.qtrv_po_pro_selection.model().rowCount()):
+                        index = self.my_dialog.qtrv_po_pro_selection.model().index(rc, 0)
+                        if self.my_dialog.qtrv_po_pro_selection.isExpanded(index):
+                            expanded_ref_fids.append(index.data(self.ref_fid_role))
+
+                    self.my_dialog.pbtn_zoom_po_pro.setEnabled(False)
+                    self.my_dialog.pbtn_clear_po_pro.setEnabled(False)
+
+                    # remove contents, but keep header
+                    self.my_dialog.qtrv_po_pro_selection.model().removeRows(0, self.my_dialog.qtrv_po_pro_selection.model().rowCount())
+
+                    if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+
+                        if len(self.session_data.po_pro_data_cache) > 0 and len(self.session_data.po_pro_reference_cache) > 0:
+
+                            data_context = qgis.core.QgsExpressionContext()
+                            # Features from Data- and Reference-Layer will show their PK and the evaluated displayExpression
+                            data_display_exp = qgis.core.QgsExpression(self.derived_settings.dataLyr.displayExpression())
+                            data_display_exp.prepare(data_context)
+
+                            ref_context = qgis.core.QgsExpressionContext()
+                            ref_display_exp = qgis.core.QgsExpression(self.derived_settings.refLyr.displayExpression())
+                            ref_display_exp.prepare(ref_context)
+
+                            self.my_dialog.pbtn_zoom_po_pro.setEnabled(True)
+                            self.my_dialog.pbtn_clear_po_pro.setEnabled(True)
+
+                            # query dataLyr with self.session_data.selected_fids
+
+                            request = qgis.core.QgsFeatureRequest().setFilterFids(list(self.session_data.po_pro_data_cache.keys()))
+
+                            # correct order to iterate without subqueries on data-layer
+                            ref_id_clause = qgis.core.QgsFeatureRequest.OrderByClause(self.derived_settings.dataLyrReferenceField.name(), True)
+                            from_clause = qgis.core.QgsFeatureRequest.OrderByClause(self.derived_settings.dataLyrStationingField.name(), True)
+                            orderby = qgis.core.QgsFeatureRequest.OrderBy([ref_id_clause, from_clause])
+                            request.setOrderBy(orderby)
+
+                            root_item = self.my_dialog.qtrv_po_pro_selection.model().invisibleRootItem()
+                            last_ref_id = None
+                            reference_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                            for data_feature in self.derived_settings.dataLyr.getFeatures(request):
+                                fvs = self.tool_check_data_feature(data_feature=data_feature)
+                                fvs.check_data_feature_valid()
+
+                                data_fid = data_feature.id()
+                                ref_id = data_feature[self.stored_settings.dataLyrReferenceFieldName]
+                                if ref_id != last_ref_id:
+                                    last_ref_id = ref_id
+                                    reference_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                    # erst hinzufügen, sonst reference_item.index().row() == -1 reference_item.index().column == -1
+                                    root_item.appendRow(reference_item)
+
+                                    ref_feature, error_msg = self.tool_get_reference_feature(ref_id=ref_id)
+                                    if ref_feature:
+                                        ref_fid = ref_feature.id()
+                                        reference_item.setData(ref_fid, self.custom_sort_role)
+                                        reference_item.setData(ref_fid, self.ref_fid_role)
+                                        ref_context.setFeature(ref_feature)
+                                        display_exp = ref_display_exp.evaluate(ref_context)
+                                        if display_exp == ref_fid or isinstance(display_exp, QtCore.QVariant):
+                                            reference_item.setText(f"# {ref_id}")
+                                        else:
+                                            reference_item.setText(f"# {ref_id} {display_exp}")
+                                        cell_widget = MyQtWidgets.QTwCellWidget()
+                                        qtb = MyQtWidgets.QTwToolButton()
+
+                                        qtb.setIcon(zoom_ref_feature_icon)
+                                        qtb.setToolTip(MY_DICT.tr('highlight_reference_feature_qtb_ttp'))
+                                        qtb.pressed.connect(self.st_toggle_ref_feature)
+                                        qtb.setProperty("ref_fid", ref_fid)
+
+                                        cell_widget.layout().addWidget(qtb)
+
+                                        qtb = MyQtWidgets.QTwToolButton()
+                                        qtb.setIcon(identify_icon)
+                                        qtb.setToolTip(MY_DICT.tr('show_feature_form_qtb_ttp'))
+                                        qtb.pressed.connect(self.st_open_ref_form)
+                                        qtb.setProperty("ref_fid", ref_fid)
+                                        cell_widget.layout().addWidget(qtb)
+
+                                        qtb = MyQtWidgets.QTwToolButton()
+                                        qtb.setIcon(previous_line_icon)
+                                        qtb.setToolTip(MY_DICT.tr('show_po_pro_reference_line_diffs'))
+                                        qtb.pressed.connect(self.cvs_toggle_reference_line_diffs)
+                                        qtb.setProperty("ref_fid", ref_fid)
+                                        cell_widget.layout().addWidget(qtb)
+
+                                        self.my_dialog.qtrv_po_pro_selection.setIndexWidget(reference_item.index(), cell_widget)
+
+
+                                    else:
+                                        # folder for false assignments, missing reference-features
+                                        # should not happen here, because this refresh is triggered by geometry-edits in reference-layer
+                                        reference_item.setText(MY_DICT.tr('unknown_reference_item', ref_id))
+                                        reference_item.setToolTip(error_msg)
+
+                                id_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                id_item.setData(data_fid, self.custom_sort_role)
+                                id_item.setData(data_fid, self.data_fid_role)
+                                data_context.setFeature(data_feature)
+                                display_exp = data_display_exp.evaluate(data_context)
+
+                                if display_exp == data_fid or isinstance(display_exp, QtCore.QVariant):
+                                    id_item.setText(f"# {data_fid}")
+                                else:
+                                    id_item.setText(f"# {data_fid} {display_exp}")
+
+                                stationing = data_feature[self.stored_settings.dataLyrStationingFieldName]
+                                from_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                from_item.setData(stationing, self.custom_sort_role)
+                                from_item.setText(str(stationing))
+                                from_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignCenter)
+
+                                cached_feature = self.session_data.po_pro_data_cache[data_fid]
+
+                                cached_stationing = 0
+                                if self.stored_settings.lrMode == 'Nabs':
+                                    cached_stationing = cached_feature.snap_n_abs
+                                elif self.stored_settings.lrMode == 'Nfract':
+                                    cached_stationing = cached_feature.snap_n_fract
+                                elif self.stored_settings.lrMode == 'Mabs':
+                                    cached_stationing = cached_feature.snap_m_abs
+
+                                cached_stationing_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                cached_stationing_item.setData(cached_stationing, self.custom_sort_role)
+                                cached_stationing_item.setText(str(cached_stationing))
+                                cached_stationing_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignCenter)
+
+                                reference_item.appendRow([id_item, from_item, cached_stationing_item])
+
+                                cell_widget = MyQtWidgets.QTwCellWidget()
+
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(remove_icon)
+                                qtb.setToolTip(MY_DICT.tr('remove_from_selection_qtb_ttp'))
+                                qtb.pressed.connect(self.st_remove_from_po_pro_cache)
+                                qtb.setProperty("data_fid", data_fid)
+                                cell_widget.layout().addWidget(qtb)
+
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setProperty("data_fid", data_fid)
+                                qtb.setIcon(identify_icon)
+                                qtb.setToolTip(MY_DICT.tr('show_feature_form_qtb_ttp'))
+                                qtb.pressed.connect(self.st_open_data_form)
+                                cell_widget.layout().addWidget(qtb)
+
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(zoom_selected_icon)
+                                qtb.setToolTip(MY_DICT.tr('zoom_to_edit_pk_ttp'))
+                                qtb.pressed.connect(self.cvs_toggle_po_pro_markers)
+                                qtb.setProperty("data_fid", data_fid)
+                                cell_widget.layout().addWidget(qtb)
+
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(move_feature_icon)
+                                qtb.setToolTip(MY_DICT.tr('pol_move_po_pro_feature_ttp'))
+                                qtb.setEnabled(self.SVS.DATA_LAYER_EDITABLE in self.system_vs)
+                                qtb.clicked.connect(self.stm_move_po_pro_feature)
+                                qtb.setProperty("data_fid", data_fid)
+                                cell_widget.layout().addWidget(qtb)
+
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(delete_icon)
+                                qtb.setToolTip(MY_DICT.tr('delete_feature_qtb_ttp'))
+                                qtb.pressed.connect(self.st_delete_feature)
+                                qtb.setProperty("data_fid", data_fid)
+                                qtb.setEnabled((self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_DELETE_ENABLED) in self.system_vs)
+                                cell_widget.layout().addWidget(qtb)
+
+                                self.my_dialog.qtrv_po_pro_selection.setIndexWidget(id_item.index(), cell_widget)
+
+                            # restore previous sort-settings
+                            self.my_dialog.qtrv_po_pro_selection.sortByColumn(old_indicator, old_order)
+
+                            self.my_dialog.qtrv_po_pro_selection.expandAll()
+
+                            if self.session_data.po_pro_feature:
+                                self.dlg_select_po_pro_selection_row(self.session_data.po_pro_feature.data_fid)
+
+    def st_remove_from_po_pro_cache(self):
+        """Removes a feature from PostProcessing-po_pro_data_cache"""
+        # Rev. 2024-08-06
+        self.cvs_hide_markers(['cn', 'crfl', 'cuca', 'cacu'])
+        data_fid = self.sender().property('data_fid')
+        self.session_data.po_pro_data_cache.pop(data_fid, None)
+        self.dlg_refresh_po_pro_section()
+
+    def sys_refresh_po_pro_reference_cache(self, ref_fid, current_geom):
+        """triggered by conn_signal == 'geometryChanged' from reference-layer (before commit)
+        validity-check of the changed and the provider-geometry regarding self.stored_settings.lrMode
+        :param ref_fid: fid of the reference-feature
+        :param current_geom: changed geometry"""
+        # Rev. 2024-08-06
+
+        checked_current_geom = None
+        checked_provider_geom = None
+
+        feature_request = qgis.core.QgsFeatureRequest(ref_fid)
+        # query returns exactly one feature from provider, if it was committed (fid positive)
+        # but nothing, if it has not yet been committed (fid negative)
+        for ref_feature in self.derived_settings.refLyr.dataProvider().getFeatures(feature_request):
+            provider_geom = ref_feature.geometry()
+            if self.stored_settings.lrMode == 'Mabs':
+                geom_m_valid, error_msg = tools.MyTools.check_geom_m_valid(current_geom)
+                if geom_m_valid:
+                    checked_current_geom = current_geom
+                else:
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_po_pro_current_geom_not_m_valid', ref_fid, error_msg))
+
+                geom_m_valid, error_msg = tools.MyTools.check_geom_m_valid(provider_geom)
+                if geom_m_valid:
+                    checked_provider_geom = provider_geom
+                else:
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_po_pro_provider_geom_not_m_valid', ref_fid, error_msg))
+            else:
+                geom_n_valid, error_msg = tools.MyTools.check_geom_n_valid(current_geom)
+                if geom_n_valid:
+                    checked_current_geom = current_geom
+                else:
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_po_pro_current_geom_not_n_valid', ref_fid, error_msg))
+
+                geom_n_valid, error_msg = tools.MyTools.check_geom_n_valid(provider_geom)
+                if geom_n_valid:
+                    checked_provider_geom = provider_geom
+                else:
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_po_pro_provider_geom_not_n_valid', ref_fid, error_msg))
+
+        if checked_current_geom and checked_provider_geom:
+
+            # _po_pro_max_ref_feature_count: original geometries are cached in self.session_data.po_pro_reference_cache (dictionary), that can get very large, if f.e. many selected shapes are moved together
+
+            # keep already cached reference-geometries (from previous 'geometryChanged'-events)
+            # => only the first version stays in cache
+            if not self.session_data.po_pro_reference_cache.get(ref_fid, None):
+
+                if len(self.session_data.po_pro_reference_cache) < self._po_pro_max_ref_feature_count:
+                    self.session_data.po_pro_reference_cache[ref_fid] = checked_provider_geom
+                else:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('max_num_po_pro_ref_features_exceeded', self._po_pro_max_ref_feature_count))
+        else:
+            # remove from po_pro_reference_cache, if existing
+            self.session_data.po_pro_reference_cache.pop(ref_fid, None)
+
+            # remove all assigned features from self.session_data.po_pro_data_cache
+            ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=ref_fid)
+            if ref_feature:
+                ref_id = ref_feature[self.derived_settings.refLyrIdField.name()]
+                get_data_features_request = qgis.core.QgsFeatureRequest()
+                get_data_features_request.setFilterExpression(f'"{self.derived_settings.dataLyrReferenceField.name()}" = \'{ref_id}\'')
+                data_features = self.derived_settings.dataLyr.getFeatures(get_data_features_request)
+                for data_feature in data_features:
+                    self.session_data.po_pro_data_cache.pop(data_feature.id(), None)
+
+                self.dlg_refresh_po_pro_section()
+
+    def sys_refresh_po_pro_data_cache(self, keep_cache: bool = True):
+        """fills po_pro_data_cache after the reference-layer-geometry-edits were committed:
+        Scans session_data.po_pro_reference_cache (cached previous geometrie) and calculates assigned segments on cached (before commit) and current (after commit) reference-geometries
+        stores all features with altered segments to self.session_data.po_pro_data_cache
+        Note: po_pro_reference_cache is filled by sys_layer_slot via refLyr geometryChanged-signal and cleared by editingStarted-signal
+        :param keep_cache:  True => keep self.session_data.po_pro_data_cache with previously cached stationings
+                            False => reset self.session_data.po_pro_data_cache and recalculate segments with current stationings
+        """
+        # Rev. 2024-08-06
+        self.cvs_hide_markers(['cn', 'crfl', 'cuca', 'cacu'])
+
+        if not keep_cache:
+            self.session_data.po_pro_data_cache = {}
+
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            if self.session_data.po_pro_reference_cache:
+                # check the cached geometries, store valid ones (cached and current) in checked_reference_cache if there are any assigned PoL-Features
+                checked_reference_cache = {}
+                # adfc => affected data feature count
+                adfc = 0
+
+                for ref_fid in self.session_data.po_pro_reference_cache:
+                    # check, if the cached reference-feature still exists in reference-layer
+
+                    ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=ref_fid)
+                    if ref_feature:
+                        if ref_feature.hasGeometry():
+                            current_geom = ref_feature.geometry()
+                            cached_geom = self.session_data.po_pro_reference_cache[ref_fid]
+
+                            ref_id = ref_feature[self.derived_settings.refLyrIdField.name()]
+
+                            get_data_features_request = qgis.core.QgsFeatureRequest()
+                            get_data_features_request.setFilterExpression(f'"{self.derived_settings.dataLyrReferenceField.name()}" = \'{ref_id}\'')
+                            # QgsFeatureIterator
+                            data_features = self.derived_settings.dataLyr.getFeatures(get_data_features_request)
+
+                            for data_feature in data_features:
+                                stationing = data_feature[self.stored_settings.dataLyrStationingFieldName]
+                                measure_feature = self.tool_create_pol_feature(data_feature.id())
+
+                                cached_feature = measure_feature.__copy__()
+                                cached_feature.set_cached_geom(cached_geom, self.derived_settings.refLyr.crs().authid())
+                                cached_feature.recalc_by_stationing(stationing, self.stored_settings.lrMode)
+
+                                if measure_feature.is_valid and cached_feature.is_valid:
+
+                                    cached_point = cached_geom.interpolate(cached_feature.snap_n_abs)
+                                    current_point = current_geom.interpolate(measure_feature.snap_n_abs)
+                                    if current_point and not current_point.isEmpty() and cached_point and not cached_point.isEmpty():
+                                        if not current_point.equals(cached_point):
+                                            adfc += 1
+                                            if adfc < self._po_pro_max_feature_count:
+                                                self.session_data.po_pro_data_cache[data_feature.id()] = cached_feature
+                                            else:
+                                                self.dlg_append_log_message('INFO', MY_DICT.tr('max_num_po_pro_features_exceeded', self._po_pro_max_feature_count))
+                                    else:
+                                        # at least one of the segments was empty, should not happen, if pol was valid
+                                        self.dlg_append_log_message('INFO', MY_DICT.tr('empty_po_pro_feature_skipped', data_feature.id()))
+
+                                else:
+                                    self.dlg_append_log_message('INFO', MY_DICT.tr('invalid_po_pro_feature_skipped', data_feature.id()))
+                        else:
+                            self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
+                    else:
+                        self.dlg_append_log_message('WARNING', error_msg)
+
+                if not adfc:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('no_po_pro_features_affected'))
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_po_pro_reference_cache'))
+
+    def cvs_toggle_reference_line_diffs(self):
+        """shows/hides/zooms the differences cached/current reference-geometry after commit of edits"""
+        # Rev. 2024-08-06
+        ref_fid = self.sender().property('ref_fid')
+
+        markers_visible = self.rb_rfl_diff_cu.isVisible()
+
+        self.rb_rfl_diff_cu.hide()
+        self.rb_rfl_diff_ca.hide()
+
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers() or QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+
+        # toggle on:
+        if not markers_visible or extent_mode:
+
+            # both geometries required: current from refLyr and cached from po_pro_reference_cache
+            current_geom = cached_geom = None
+            reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=ref_fid)
+            if reference_geom:
+                current_geom = reference_geom
+            else:
+                self.dlg_append_log_message('WARNING', error_msg)
+
+            if ref_fid in self.session_data.po_pro_reference_cache:
+                cached_geom = self.session_data.po_pro_reference_cache[ref_fid]
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('po_pro_cached_reference_feature_missing_or_invalid', reference_fid))
+
+            # note:
+            # the condition "not cached_geom.equals(current_geom)" should always be True, else this geometry were not in self.session_data.po_pro_reference_cache
+            if current_geom and cached_geom and not cached_geom.equals(current_geom):
+                x_coords = []
+                y_coords = []
+                ca_cu_diff_geom = cached_geom.difference(current_geom)
+
+                if extent_mode:
+                    extent = ca_cu_diff_geom.boundingBox()
+                    x_coords.append(extent.xMinimum())
+                    x_coords.append(extent.xMaximum())
+                    y_coords.append(extent.yMinimum())
+                    y_coords.append(extent.yMaximum())
+
+                self.rb_rfl_diff_ca.setToGeometry(ca_cu_diff_geom, self.derived_settings.refLyr)
+
+                cu_ca_diff_geom = current_geom.difference(cached_geom)
+
+                if extent_mode:
+                    extent = cu_ca_diff_geom.boundingBox()
+                    x_coords.append(extent.xMinimum())
+                    x_coords.append(extent.xMaximum())
+                    y_coords.append(extent.yMinimum())
+                    y_coords.append(extent.yMaximum())
+
+                self.rb_rfl_diff_cu.setToGeometry(cu_ca_diff_geom, self.derived_settings.refLyr)
+
+                if extent_mode:
+                    self.cvs_zoom_to_coords(x_coords, y_coords, extent_mode, self.derived_settings.refLyr.crs())
+
+    def tool_select_po_pro_feature(self, data_fid: int, draw_markers: list = None, extent_markers: list = None, extent_mode: str = None):
+        """checks and sets self.session_data.po_pro_feature
+        :param data_fid: fid of po_pro-feature
+        :param draw_markers: optional list of marker-types, here additionally for cached geometries: cn cnt csgn
+        :param extent_markers: optional zoom-to markers
+        :param extent_mode: zoom/pan
+        """
+        # Rev. 2024-08-06
+        if not draw_markers:
+            draw_markers = []
+
+        if not extent_markers:
+            extent_markers = []
+
+        self.session_data.po_pro_feature = None
+        if data_fid in self.session_data.po_pro_data_cache:
+            po_pro_cached_feature = self.session_data.po_pro_data_cache[data_fid]
+            po_pro_feature = self.tool_create_pol_feature(data_fid)
+            if po_pro_feature:
+                if po_pro_feature.ref_fid in self.session_data.po_pro_reference_cache:
+                    reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=po_pro_feature.ref_fid)
+                    if reference_geom:
+                        self.session_data.po_pro_feature = po_pro_feature
+                        self.dlg_select_po_pro_selection_row(data_fid)
+                        self.cvs_draw_po_pro_feature(self.session_data.po_pro_feature, draw_markers, extent_markers, extent_mode)
+                    else:
+                        self.dlg_append_log_message('WARNING', error_msg)
+                else:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('po_pro_cached_reference_feature_missing_or_invalid', po_pro_feature.ref_fid))
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('invalid_po_pro_feature_skipped', data_fid))
+        else:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('po_pro_data_feature_not_in_cache', data_fid))
+
+    def gui_refresh(self):
+        """complete refresh of all gui-elements"""
+        # Rev. 2024-08-06
+
+        # reload language, if settings have changed, affects plugin-messages and dialog-contents
+        # Note:
+        # MY_DICT global variable initialized above *for this script*
+        # occurrences in other scripts, f.e. LinearReference.py for QGis-ToolBar, are not reloaded
+        global MY_DICT
+
+        MY_DICT = SQLiteDict()
+
+        # deletes and recreates current dialog
+        self.sys_check_settings()
+        self.dlg_init()
+        self.cvs_apply_style_to_graphics()
+        self.cvs_hide_markers()
+
+    def ssc_ref_lyr_id_field(self) -> None:
+        """change Reference-Layer-ID-Field in QComboBox
+        this can be any unique field, f.e. the usual numerical auto-incrementing fid-field
+        """
+        # Rev. 2024-08-06
+
+        self.stored_settings.refLyrIdFieldName = None
+
+        ref_lyr_id_field = self.my_dialog.qcbn_ref_lyr_id_field.currentData()
+        if ref_lyr_id_field:
+            self.stored_settings.refLyrIdFieldName = ref_lyr_id_field.name()
+
+        self.sys_check_settings()
+
+        self.tool_restart_session()
+
+    def ssc_data_layer(self) -> None:
         """change Data-Layer in QComboBox"""
-        # Rev. 2023-05-08
-        self.rs.selected_pks = []
-        self.rs.edit_pk = None
+        # Rev. 2024-08-06
+        self.stored_settings.dataLyrId = None
 
-        self.ss.dataLyrId = None
-        self.ss.dataLyrIdFieldName = None
-        self.ss.dataLyrReferenceFieldName = None
-        self.ss.dataLyrMeasureFieldName = None
-        self.ss.showLyrId = None
-        self.ss.showLyrBackReferenceFieldName = None
-        self.connect_data_layer(self.my_dialogue.qcbn_data_layer.currentData())
-        self.check_settings()
-        self.refresh_data_layer_actions()
-        self.dlg_refresh_edit_section()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
+        selected_data_layer = self.my_dialog.qcbn_data_layer.currentData()
+        if selected_data_layer:
+            self.stored_settings.dataLyrId = selected_data_layer.id()
 
-    def disconnect_data_layers(self):
-        """disconnect all potential Data-layers: disconnect signal/slot and removeAction """
-        # Rev. 2023-05-22
-        data_layers = tools.MyToolFunctions.get_data_layers()
-        for layer_id in data_layers:
-            layer = data_layers[layer_id]
-
-            action_list = [action for action in layer.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
-            for action in action_list:
-                layer.actions().removeAction(action.id())
-
-            for connection in self.rs.data_layer_connections:
-                try:
-                    layer.disconnect(connection)
-                except Exception as e:
-                    # "'method' object is not connected"
-                    pass
-
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{layer.id()}"]
-
-            for at_wdg in attribute_table_widgets:
-                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
-                if reload_action:
-                    reload_action.trigger()
-
-        self.rs.data_layer_connections = []
-
-    def disconnect_reference_layers(self):
-        """disconnect all potential Reference-layers: disconnect signal/slot"""
-        # Rev. 2023-05-22
-        disconnect_errors = []
-        linestring_layers = tools.MyToolFunctions.get_linestring_layers()
-        for layer_id in linestring_layers:
-            layer = linestring_layers[layer_id]
-            for connection in self.rs.reference_layer_connections:
-                try:
-                    layer.disconnect(connection)
-                except Exception as e:
-                    # "'method' object is not connected"
-                    disconnect_errors.append(f"'{layer.name()}' disconnect ➜ \"{e}\"")
-
-        self.rs.reference_layer_connections = []
-
-        if disconnect_errors:
-            # print(disconnect_errors)
-            pass
-
-    def disconnect_show_layer(self):
-        """disconnect currently connected Show-Layer: disconnect signal/slot and removeAction """
-        # Rev. 2023-05-22
-        if self.ds.showLyr:
-
-            action_list = [action for action in self.ds.showLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
-            for action in action_list:
-                self.ds.showLyr.actions().removeAction(action.id())
-
-            for connection in self.rs.show_layer_connections:
-                try:
-                    self.ds.showLyr.disconnect(connection)
-                except Exception as e:
-                    # "'method' object is not connected"
-                    pass
-
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.showLyr.id()}"]
-
-            for at_wdg in attribute_table_widgets:
-                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
-                if reload_action:
-                    reload_action.trigger()
-
-    def disconnect_show_layers(self):
-        """disconnect all potential show-layers: disconnect signal/slot and removeAction """
-        # Rev. 2023-05-22
-        disconnect_errors = []
-        point_show_layers = tools.MyToolFunctions.get_point_show_layers()
-        for layer_id in point_show_layers:
-            layer = point_show_layers[layer_id]
-
-            action_list = [action for action in layer.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
-            for action in action_list:
-                layer.actions().removeAction(action.id())
-
-            for connection in self.rs.show_layer_connections:
-                try:
-                    layer.disconnect(connection)
-                except Exception as e:
-                    # "'method' object is not connected"
-                    disconnect_errors.append(f"'{layer.name()}' disconnect ➜ \"{e}\"")
-
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{layer.id()}"]
-
-            for at_wdg in attribute_table_widgets:
-                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
-                if reload_action:
-                    reload_action.trigger()
-
-        self.rs.show_layer_connections = []
-        if disconnect_errors:
-            # print(disconnect_errors)
-            pass
-
-    def disconnect_all_layers(self):
-        """remove Plugin-Layer-Actions from Vector-Layers
-        removes connected slots
-        .. Note::
-            * no table refresh ➜ reopen table/form necessary
-            * attributeTableConfig.setActionWidgetVisible(True) will be unchanged
-        """
-        # Rev. 2023-05-08
-
-        self.disconnect_data_layers()
-        self.disconnect_reference_layers()
-        self.disconnect_show_layers()
-
-    def connect_all_layers(self):
-        if self.ds.dataLyr:
-            self.connect_data_layer(self.ds.dataLyr)
-
-        if self.ds.refLyr:
-            self.connect_reference_layer(self.ds.refLyr)
-
-        if self.ds.showLyr:
-            self.connect_show_layer(self.ds.showLyr)
-
-    def refresh_data_layer_actions(self):
-        """refreshes the action-buttons in Data-Layer"""
-        if self.ds.dataLyr is not None:
-            action_list = [action for action in self.ds.dataLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
-            for action in action_list:
-                self.ds.dataLyr.actions().removeAction(action.id())
-
-            if self.cf.data_layer_complete:
-                action_dict = {action.id(): action for action in self.ds.dataLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]}
-                if not self._lyr_act_id_1 in action_dict:
-                    data_layer_s_h_action = qgis.core.QgsAction(
-                        self._lyr_act_id_1,
-                        qgis.core.QgsAction.ActionType.GenericPython,  # int 1
-                        'Select + Highlight',
-                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',False)",
-                        ':icons/mIconSelected.svg',
-                        False,
-                        '',
-                        {'Feature'},
-                        ''
-                    )
-                    self.ds.dataLyr.actions().addAction(data_layer_s_h_action)
-                if not self._lyr_act_id_2 in action_dict:
-                    data_layer_s_h_p_action = qgis.core.QgsAction(
-                        self._lyr_act_id_2,
-                        qgis.core.QgsAction.ActionType.GenericPython,  # int 1
-                        'Select + Highlight + Pan',
-                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',True)",
-                        ':icons/mActionPanToSelected.svg',
-                        False,
-                        '',
-                        {'Feature'},
-                        ''
-                    )
-
-                    self.ds.dataLyr.actions().addAction(data_layer_s_h_p_action)
-
-            atc = self.ds.dataLyr.attributeTableConfig()
-            if not atc.actionWidgetVisible():
-                # qgis.core.QgsAttributeTableConfig.ButtonList / qgis.core.QgsAttributeTableConfig.DropDown
-                atc.setActionWidgetStyle(qgis.core.QgsAttributeTableConfig.ButtonList)
-                atc.setActionWidgetVisible(True)
-                self.ds.dataLyr.setAttributeTableConfig(atc)
-
-            # tricky: get all associated opened attribute-tables for this Layer and refresh their contents to show the new actions
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.dataLyr.id()}"]
-
-            for at_wdg in attribute_table_widgets:
-                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
-                if reload_action:
-                    reload_action.trigger()
-
-    def disconnect_data_layer(self):
-        """disconnects currently registered Data-Layer"""
-        if self.ds.dataLyr:
-            action_list = [action for action in self.ds.dataLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
-            for action in action_list:
-                self.ds.dataLyr.actions().removeAction(action.id())
-
-            for connection in self.rs.data_layer_connections:
-                try:
-                    self.ds.dataLyr.disconnect(connection)
-                except Exception as e:
-                    # "'method' object is not connected"
-                    pass
-
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.dataLyr.id()}"]
-
-            for at_wdg in attribute_table_widgets:
-                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
-                if reload_action:
-                    reload_action.trigger()
-
-    def connect_data_layer(self, data_layer) -> None:
-        """prepares Data-Layer:
-        sets self.ss.dataLyrId
-        adds actions
-        connects signals
-        disconnects previous dataLyr
-        """
-        # Rev. 2023-05-08
-        critical_msg = ''
-        success_msg = ''
-        info_msg = ''
-        warning_msg = ''
-
-        # disconnect
-        self.disconnect_data_layer()
-
-        self.ss.dataLyrId = None
-
-        if data_layer:
-
-            # https://doc.qt.io/qt-5/qmetaobject-connection.html
-            self.rs.data_layer_connections.append(data_layer.configChanged.connect(self.refresh_gui))
-            self.rs.data_layer_connections.append(data_layer.afterCommitChanges.connect(self.dlg_refresh_data_sections))
-            self.rs.data_layer_connections.append(data_layer.displayExpressionChanged.connect(self.refresh_gui))
-
-            storage_type = data_layer.dataProvider().storageType()
+            storage_type = selected_data_layer.dataProvider().storageType()
             if storage_type in ['XLSX', 'ODS']:
-                warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Source-Format of chosen Data-Layer {apos}{0}{apos} is a file-based office-format (*.xlsx/*.odf), supported, but not recommended..."),data_layer.name())
+                self.dlg_append_log_message('INFO', MY_DICT.tr('office_format_warning'))
 
-            caps = data_layer.dataProvider().capabilities()
+            # check data-layer-privileges only for dlg_append_log_message, the check will be repeated on every sys_connect_data_Layer
+            caps = selected_data_layer.dataProvider().capabilities()
             caps_result = []
             if not (caps & qgis.core.QgsVectorDataProvider.AddFeatures):
                 caps_result.append("AddFeatures")
@@ -2029,416 +4718,319 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
 
             if caps_result:
                 caps_string = ", ".join(caps_result)
-                warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Missing capabilities in Data-Layer:{br}{0}{br}{nbsp}{arrow}{nbsp}Some editing options will not be available"),caps_string)
 
-            self.ss.dataLyrId = data_layer.id()
+                self.dlg_append_log_message('INFO', MY_DICT.tr('missing_capabilities', caps_string))
 
-        self.refresh_data_layer_actions()
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
+        self.sys_check_settings()
+        self.tool_restart_session()
 
-    def s_change_show_layer(self) -> None:
-        """change Show-Layer in QComboBox, items are filtered to suitable layer-types"""
-        # Rev. 2023-05-03
-        self.ss.showLyrId = None
-        self.ss.showLyrBackReferenceFieldName = None
-        self.connect_show_layer(self.my_dialogue.qcbn_show_layer.currentData())
-        self.check_settings()
-        self.dlg_refresh_feature_selection_section()
-        self.dlg_refresh_layer_settings_section()
+    def scc_reset_style(self) -> None:
+        """Resets the customizable styles to their default-values"""
+        # Rev. 2024-08-06
+        self.stored_settings.pt_sn_icon_type = StoredSettings()._pt_sn_icon_type
+        self.stored_settings.pt_sn_icon_size = StoredSettings()._pt_sn_icon_size
+        self.stored_settings.pt_sn_pen_width = StoredSettings()._pt_sn_pen_width
+        self.stored_settings.pt_sn_color = StoredSettings()._pt_sn_color
+        self.stored_settings.pt_sn_fill_color = StoredSettings()._pt_sn_fill_color
 
-    def connect_show_layer(self, show_layer) -> None:
-        """prepares Show-Layer:
-        sets self.ss.showLyrId
-        adds actions
-        connects signals
-        cleans previous showLyr
-        called from s_change_show_layer and restore_settings"""
-        # Rev. 2023-05-03
-        # previous showLyr:
-        self.disconnect_show_layers()
+        self.stored_settings.ref_line_style = StoredSettings()._ref_line_style
+        self.stored_settings.ref_line_width = StoredSettings()._ref_line_width
+        self.stored_settings.ref_line_color = StoredSettings()._ref_line_color
 
-        self.ss.showLyrId = None
-        if show_layer:
-            self.ss.showLyrId = show_layer.id()
-            self.rs.show_layer_connections.append(show_layer.configChanged.connect(self.refresh_gui))
-            self.rs.show_layer_connections.append(show_layer.displayExpressionChanged.connect(self.refresh_gui))
-            self.ds.showLyr = show_layer
-            self.refresh_show_layer_actions()
+        self.dlg_refresh_style_settings_section()
+        self.cvs_apply_style_to_graphics()
 
-    def refresh_show_layer_actions(self):
-        """refreshes the action-buttons in Show-Layer"""
-        if self.ds.showLyr is not None:
-            action_list = [action for action in self.ds.showLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]]
-            for action in action_list:
-                self.ds.showLyr.actions().removeAction(action.id())
+    def sys_connect_data_layer(self, data_layer_id: str) -> None:
+        """prepares Data-Layer:
+        - checks existance and suitability
+        - re-sets self.stored_settings.dataLyrId
+        - re-sets self.derived_settings.dataLyr
+        - connects signals to slots
+        :param data_layer_id: id of data-layer
+        """
+        # Rev. 2024-08-06
+        self.stored_settings.dataLyrId = None
+        self.derived_settings.dataLyr = None
 
-            action_dict = {action.id(): action for action in self.ds.showLyr.actions().actions() if action.id() in [self._lyr_act_id_1, self._lyr_act_id_2]}
+        data_layer = qgis.core.QgsProject.instance().mapLayer(data_layer_id)
 
-            if self.cf.show_layer_complete:
-                # BackReference-Field necessary for these layer-actions
-                if not self._lyr_act_id_1 in action_dict:
-                    show_layer_s_h_action = qgis.core.QgsAction(
-                        self._lyr_act_id_1,
-                        qgis.core.QgsAction.ActionType.GenericPython,  # int 1
-                        'Select + Highlight',
-                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',False)",
-                        ':icons/mIconSelected.svg',
-                        False,
-                        '',
-                        {'Feature'},
-                        ''
-                    )
-                    self.ds.showLyr.actions().addAction(show_layer_s_h_action)
-                if not self._lyr_act_id_2 in action_dict:
-                    show_layer_s_h_p_action = qgis.core.QgsAction(
-                        self._lyr_act_id_2,
-                        qgis.core.QgsAction.ActionType.GenericPython,  # int 1
-                        'Select + Highlight + Pan',
-                        "from LinearReferencing.map_tools.FeatureActions import edit_point_on_line_feature\nedit_point_on_line_feature([%@id%],'[%@layer_id%]',True)",
-                        ':icons/mActionPanToSelected.svg',
-                        False,
-                        '',
-                        {'Feature'},
-                        ''
-                    )
-                    self.ds.showLyr.actions().addAction(show_layer_s_h_p_action)
+        # check usability
+        if data_layer and data_layer.isValid() and data_layer.type() == qgis.core.QgsMapLayerType.VectorLayer and data_layer.dataProvider().name() != 'virtual' and data_layer.dataProvider().wkbType() == qgis.core.QgsWkbTypes.NoGeometry:
 
-            atc = self.ds.showLyr.attributeTableConfig()
+            self.system_vs |= self.SVS.DATA_LAYER_EXISTS
+
+            self.stored_settings.dataLyrId = data_layer.id()
+            self.derived_settings.dataLyr = data_layer
+
+            self.sys_connect_layer_slot(data_layer, 'displayExpressionChanged', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'attributeValueChanged', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'editCommandStarted', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'editCommandEnded', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'featureAdded', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'editingStarted', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'editingStopped', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'subsetStringChanged', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'committedFeaturesAdded', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'featuresDeleted', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'committedAttributeValuesChanges', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'afterCommitChanges', self.sys_layer_slot)
+            self.sys_connect_layer_slot(data_layer, 'committedFeaturesRemoved', self.sys_layer_slot)
+
+            self.system_vs |= self.SVS.DATA_LAYER_CONNECTED
+
+            # check data-layer-privileges
+            if data_layer.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.AddFeatures:
+                self.system_vs |= self.SVS.DATA_LAYER_INSERT_ENABLED
+            if data_layer.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.ChangeAttributeValues:
+                self.system_vs |= self.SVS.DATA_LAYER_UPDATE_ENABLED
+            if data_layer.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.DeleteFeatures:
+                self.system_vs |= self.SVS.DATA_LAYER_DELETE_ENABLED
+            if data_layer.isEditable():
+                self.system_vs |= self.SVS.DATA_LAYER_EDITABLE
+
+    def gui_add_layer_actions(self):
+        """adds layer-actions to data- and show-layer"""
+        # Rev.
+        # remove all existing plugin-created layer-actions from all layers except the current registered plugin-layer
+        self.gui_remove_layer_actions()
+
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            # force showing of the action-column in attribute-table
+            atc = self.derived_settings.dataLyr.attributeTableConfig()
             if not atc.actionWidgetVisible():
                 # qgis.core.QgsAttributeTableConfig.ButtonList / qgis.core.QgsAttributeTableConfig.DropDown
                 atc.setActionWidgetStyle(qgis.core.QgsAttributeTableConfig.ButtonList)
                 atc.setActionWidgetVisible(True)
-                self.ds.showLyr.setAttributeTableConfig(atc)
+                self.derived_settings.dataLyr.setAttributeTableConfig(atc)
 
-            # tricky: get all associated opened attribute-tables for this Layer and refresh their contents to show the new actions
-            attribute_table_widgets = [widget for widget in QtWidgets.QApplication.instance().allWidgets() if isinstance(widget, QtWidgets.QDialog) and widget.objectName() == f"QgsAttributeTableDialog/{self.ds.showLyr.id()}"]
+            action_dict = {action.id(): action for action in self.derived_settings.dataLyr.actions().actions() if action.id() in [self._dataLyr_act_id]}
+            if not self._dataLyr_act_id in action_dict:
+                data_layer_action = qgis.core.QgsAction(
+                    self._dataLyr_act_id,
+                    qgis.core.QgsAction.ActionType.GenericPython,  # int 1
+                    MY_DICT.tr('fa_highlight_zoom_ttp'),
+                    "from LinearReferencing.map_tools.PolEvt import set_pol_edit_fid\nset_pol_edit_fid([%@id%],'[%@layer_id%]')",
+                    ':icons/mIconZoom.svg',
+                    False,
+                    '',
+                    {'Feature'},
+                    ''
+                )
+                self.derived_settings.dataLyr.actions().addAction(data_layer_action)
 
-            for at_wdg in attribute_table_widgets:
-                reload_action = at_wdg.findChild(QtWidgets.QAction, 'mActionReload')
-                if reload_action:
-                    reload_action.trigger()
+                tools.MyTools.re_open_attribute_tables(self.iface, self.derived_settings.dataLyr)
+                tools.MyTools.re_open_feature_forms(self.iface, self.derived_settings.dataLyr)
 
-    def show_map_coords_in_dialogue(self, point: qgis.core.QgsPointXY | qgis.core.QgsGeometry):
-        """shows the point-coords (transformed cursor-position) in dialogue
-        :param point: two types supported"""
-        # Rev. 2023-05-03
-        if isinstance(point, qgis.core.QgsGeometry):
-            point = point.centroid().asPoint()
-        # round the values with num_digits, dependend from the projection
-        str_map_x = '{:.{prec}f}'.format(point.x(), prec=self.rs.num_digits)
-        str_map_y = '{:.{prec}f}'.format(point.y(), prec=self.rs.num_digits)
-        self.my_dialogue.le_map_x.setText(str_map_x)
-        self.my_dialogue.le_map_y.setText(str_map_y)
+        # same for Show-Layer, the action-called python-function "set_pol_edit_fid" will regard, from which layer it was triggered
+        if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+            atc = self.derived_settings.showLyr.attributeTableConfig()
+            if not atc.actionWidgetVisible():
+                # qgis.core.QgsAttributeTableConfig.ButtonList / qgis.core.QgsAttributeTableConfig.DropDown
+                atc.setActionWidgetStyle(qgis.core.QgsAttributeTableConfig.ButtonList)
+                atc.setActionWidgetVisible(True)
+                self.derived_settings.showLyr.setAttributeTableConfig(atc)
 
-    def show_snap_coords_in_dialogue(self, point: qgis.core.QgsPointXY | qgis.core.QgsGeometry):
-        """shows the point-coords (transformed snapped to line-position) in dialogue
-        :param point: two types supported"""
-        # Rev. 2023-05-03
-        if isinstance(point, qgis.core.QgsGeometry):
-            point = point.centroid().asPoint()
-        # round the values with num_digits, depending on the projection
-        str_snap_x = '{:.{prec}f}'.format(point.x(), prec=self.rs.num_digits)
-        str_snap_y = '{:.{prec}f}'.format(point.y(), prec=self.rs.num_digits)
-        self.my_dialogue.le_snap_pt1_x.setText(str_snap_x)
-        self.my_dialogue.le_snap_pt1_y.setText(str_snap_y)
+            action_dict = {action.id(): action for action in self.derived_settings.showLyr.actions().actions() if action.id() in [self._showLyr_act_id]}
+            if not self._showLyr_act_id in action_dict:
+                show_layer_action = qgis.core.QgsAction(
+                    self._showLyr_act_id,
+                    qgis.core.QgsAction.ActionType.GenericPython,  # int 1
+                    MY_DICT.tr('fa_highlight_zoom_ttp'),
+                    "from LinearReferencing.map_tools.PolEvt import set_pol_edit_fid\nset_pol_edit_fid([%@id%],'[%@layer_id%]')",
+                    ':icons/mIconZoom.svg',
+                    False,
+                    '',
+                    {'Feature'},
+                    ''
+                )
+                self.derived_settings.showLyr.actions().addAction(show_layer_action)
 
-    def show_measure_in_dialogue(self, measure: float):
-        """shows this value in DoubleSpinBox"""
-        # Rev. 2023-05-03
-        with QtCore.QSignalBlocker(self.my_dialogue.dspbx_measure):
-            self.my_dialogue.dspbx_measure.setValue(measure)
+                tools.MyTools.re_open_attribute_tables(self.iface, self.derived_settings.showLyr)
+                tools.MyTools.re_open_feature_forms(self.iface, self.derived_settings.showLyr)
 
-    def show_measure_fract_in_dialogue(self, measure_fract: float):
-        """shows this value in DoubleSpinBox"""
-        # Rev. 2023-05-03
-        with QtCore.QSignalBlocker(self.my_dialogue.dspbx_measure_fract):
-            self.my_dialogue.dspbx_measure_fract.setValue(measure_fract)
+    def gui_remove_layer_actions(self):
+        """removes the layer-actions from dataLyr and showLyr"""
+        # Rev. 2024-08-06
 
-    def canvasMoveEvent(self, event: qgis.gui.QgsMapMouseEvent) -> None:
-        """MouseMove on canvas
-        further action depending on rs.tool_mode
-        :param event:
+        if self.derived_settings.dataLyr:
+            # iterate through all registered layer-actions
+            for action in self.derived_settings.dataLyr.actions().actions():
+                # remove the ones belonging to this MapTool
+                if action.id() == self._dataLyr_act_id:
+                    self.derived_settings.dataLyr.actions().removeAction(action.id())
+                    # sadly no automatic refresh after removeAction, attribute-tables and -forms still show the action-icons
+                    tools.MyTools.re_open_attribute_tables(self.iface, self.derived_settings.dataLyr)
+                    tools.MyTools.re_open_feature_forms(self.iface, self.derived_settings.dataLyr)
+
+        # same procedure for Show-Layer
+
+        if self.derived_settings.showLyr:
+            for action in self.derived_settings.showLyr.actions().actions():
+                if action.id() == self._showLyr_act_id:
+                    self.derived_settings.showLyr.actions().removeAction(action.id())
+                    tools.MyTools.re_open_attribute_tables(self.iface, self.derived_settings.showLyr)
+                    tools.MyTools.re_open_feature_forms(self.iface, self.derived_settings.showLyr)
+
+    def ssc_show_layer(self) -> None:
+        """change Show-Layer in QComboBox, items are filtered to suitable layer-types"""
+        # Rev. 2024-08-06
+        self.stored_settings.showLyrId = None
+        selected_show_layer = self.my_dialog.qcbn_show_layer.currentData()
+        if selected_show_layer:
+            self.stored_settings.showLyrId = selected_show_layer.id()
+
+        self.sys_check_settings()
+        self.tool_restart_session()
+
+    def sys_connect_show_layer(self, show_layer_id: str) -> None:
+        """prepares Show-Layer:
+        - re-sets self.stored_settings.showLyrId
+        - re-sets self.derived_settings.showLyr
+        - connects signals to slots
+        :param show_layer_id: ID of show-layer
         """
-        # Rev. 2023-05-03
-        point_xy = self.iface.mapCanvas().getCoordinateTransform().toMapCoordinates(event.x(), event.y())
-        self.show_map_coords_in_dialogue(point_xy)
+        # Rev. 2024-08-06
+        self.stored_settings.showLyrId = None
+        self.derived_settings.showLyr = None
 
-        if self.rs.tool_mode == 'move_point':
-            if self.rs.snapped_ref_fid is not None:
-                ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
+        single_point_wkb_types = [
+            qgis.core.QgsWkbTypes.Point25D,
+            qgis.core.QgsWkbTypes.Point,
+            qgis.core.QgsWkbTypes.PointZ,
+            qgis.core.QgsWkbTypes.PointM,
+            qgis.core.QgsWkbTypes.PointZM,
+        ]
 
-                ref_projected_point_geom = qgis.core.QgsGeometry.fromPointXY(point_xy)
-                ref_projected_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
+        show_layer = qgis.core.QgsProject.instance().mapLayer(show_layer_id)
 
-                # see https://qgis.org/pyqgis/master/core/QgsGeometry.html#qgis.core.QgsGeometry.closestSegmentWithContext
-                # returns tuple: (sqrDist, minDistPoint, nextVertexIndex, leftOrRightOfSegment)
-                point_on_line = ref_feature.geometry().closestSegmentWithContext(ref_projected_point_geom.asPoint())
-                # sqr_dist = point_on_line[0]
-                # <0 left, >0 right, ==0 on the line
-                # side = point_on_line[3]
-                # abs_dist = math.sqrt(sqr_dist)
-                # offset = abs_dist * side * -1
-                current_measure = ref_feature.geometry().lineLocatePoint(qgis.core.QgsGeometry.fromPointXY(point_on_line[1]))
-                delta = current_measure - self.rs.last_measure
-                measure = self.rs.current_measure + delta
-                self.rs.current_measure = self.rs.last_measure = max(0, min(measure, ref_feature.geometry().length()))
-                self.show_measure_in_dialogue(self.rs.current_measure)
-                self.show_measure_fract_in_dialogue(self.rs.current_measure / ref_feature.geometry().length())
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
+        # no 'virtual'-check, show-layer could be vector-layer on a database-view
+        # and show_layer.dataProvider().name() == 'virtual'
+        if show_layer and show_layer.isValid() and show_layer.type() == qgis.core.QgsMapLayerType.VectorLayer and show_layer.dataProvider().wkbType() in single_point_wkb_types:
+            if show_layer.dataProvider().name() == 'virtual':
+                # only enable fitting virtual layers...
+                virtual_check_contents = [
+                    self.derived_settings.refLyr.id(),
+                    self.derived_settings.refLyrIdField.name(),
+                    self.derived_settings.dataLyr.id(),
+                    self.derived_settings.dataLyrIdField.name(),
+                    self.derived_settings.dataLyrReferenceField.name(),
+                    self.derived_settings.dataLyrStationingField.name()
+                ]
 
-        elif self.rs.tool_mode == 'select_features':
+                if self.stored_settings.lrMode in ['Nabs', 'Nfract']:
+                    virtual_check_contents.append('ST_Line_Interpolate_Point')
+                    if all(s in show_layer.dataProvider().uri().uri() for s in virtual_check_contents):
+                        self.system_vs |= self.SVS.SHOW_LAYER_EXISTS
 
-            if self.rs.mouse_down_point:
-                # draw selection-rectangle
-                mouse_move_point = self.iface.mapCanvas().getCoordinateTransform().toMapCoordinates(event.x(), event.y())
-                geom = qgis.core.QgsGeometry.fromRect(qgis.core.QgsRectangle(self.rs.mouse_down_point, mouse_move_point))
-                self.rb_selection_rect.setToGeometry(geom, None)
-                self.rb_selection_rect.show()
+                elif self.stored_settings.lrMode == 'Mabs':
+                    virtual_check_contents.append('ST_TrajectoryInterpolatePoint')
+                    if all(s in show_layer.dataProvider().uri().uri() for s in virtual_check_contents):
+                        self.system_vs |= self.SVS.SHOW_LAYER_EXISTS
 
-        elif self.rs.tool_mode == 'measuring':
-            # running measurement, stop with mouseReleaseEvent()
-            if self.cf.reference_layer_defined:
-                snap_filter = tools.MyToolFunctions.OneLayerFilter(self.ds.refLyr)
 
-                m = self.iface.mapCanvas().snappingUtils().snapToMap(event.pos(), snap_filter)
-                self.snap_indicator.setMatch(m)
-                # qgis.core.QgsPointXY
-
-                if self.snap_indicator.match().type():
-                    snapped_ref_fid = m.featureId()
-                    ref_feature = self.ds.refLyr.getFeature(snapped_ref_fid)
-                    # always, because otherwise no snapping...
-                    snapped_point_xy = self.snap_indicator.match().point()
-                    self.show_snap_coords_in_dialogue(snapped_point_xy)
-                    self.draw_reference_geom(snapped_ref_fid)
-                    self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, snapped_ref_fid)
-
-                    snapped_point_geom = qgis.core.QgsGeometry.fromPointXY(snapped_point_xy)
-                    if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                        snapped_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
-                    measure = ref_feature.geometry().lineLocatePoint(snapped_point_geom)
-
-                    self.show_measure_in_dialogue(measure)
-                    self.show_measure_fract_in_dialogue(measure / ref_feature.geometry().length())
-
-    def dlg_refresh_reference_layer_section(self):
-        """re-populates the QComboBoxN with the List of Reference-Layer-Features"""
-        # Rev. 2023-05-03
-        if self.my_dialogue and self.ds.refLyr:
-            self.my_dialogue.qcbn_snapped_ref_fid.blockSignals(True)
-
-            in_model = QtGui.QStandardItemModel(0, 2)
-            context = qgis.core.QgsExpressionContext()
-            exp = qgis.core.QgsExpression(self.ds.refLyr.displayExpression())
-            for feature in self.ds.refLyr.getFeatures():
-                context.setFeature(feature)
-                disp_exp_evaluated = exp.evaluate(context)
-
-                items = []
-                item = QtGui.QStandardItem()
-                item.setData(feature.id(), 0)
-                item.setData(feature.id(), 256)
-                items.append(item)
-
-                item = QtGui.QStandardItem()
-                item.setData(disp_exp_evaluated, 0)
-                items.append(item)
-
-                item = QtGui.QStandardItem()
-                item.setData(feature.geometry().length(), 0)
-                items.append(item)
-
-                in_model.appendRow(items)
-
-            self.my_dialogue.qcbn_snapped_ref_fid.set_model(in_model)
-
-            if self.rs.snapped_ref_fid is not None:
-                self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, self.rs.snapped_ref_fid)
-
-            self.my_dialogue.qcbn_snapped_ref_fid.blockSignals(False)
-
-    def canvasReleaseEvent(self, event: qgis.gui.QgsMapMouseEvent) -> None:
-        """mouseUp on canvas
-           further action depending on rs.tool_mode
-           :param event:
-           """
-        # Rev. 2023-05-03
-        point_xy = self.iface.mapCanvas().getCoordinateTransform().toMapCoordinates(event.x(), event.y())
-        self.show_map_coords_in_dialogue(point_xy)
-
-        if self.rs.tool_mode == 'move_point':
-            self.vm_pt_edit.hide()
-            if self.cf.measure_completed:
-                ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-
-                ref_projected_point_geom = qgis.core.QgsGeometry.fromPointXY(point_xy)
-                ref_projected_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
-
-                # see https://qgis.org/pyqgis/master/core/QgsGeometry.html#qgis.core.QgsGeometry.closestSegmentWithContext
-                # returns tuple: (sqrDist, minDistPoint, nextVertexIndex, leftOrRightOfSegment)
-                point_on_line = ref_feature.geometry().closestSegmentWithContext(ref_projected_point_geom.asPoint())
-                # sqr_dist = point_on_line[0]
-                # <0 left, >0 right, ==0 on the line
-                # side = point_on_line[3]
-                # abs_dist = math.sqrt(sqr_dist)
-
-                # offset = abs_dist * side * -1
-
-                current_measure = ref_feature.geometry().lineLocatePoint(qgis.core.QgsGeometry.fromPointXY(point_on_line[1]))
-
-                delta = current_measure - self.rs.last_measure
-                #
-                next_measure = self.rs.current_measure + delta
-
-                self.rs.current_measure = max(0, min(next_measure, ref_feature.geometry().length()))
-                self.show_measure_in_dialogue(self.rs.current_measure)
-                self.show_measure_fract_in_dialogue(self.rs.current_measure / ref_feature.geometry().length())
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-                self.rs.last_measure = None
-
-                self.check_settings('before_move_point')
-
-        elif self.rs.tool_mode == 'after_measure':
-            # convenience
-            self.resume_measure()
-        elif self.rs.tool_mode == 'select_features':
-            self.rb_ref.hide()
-            self.vm_pt_edit.hide()
-            self.vm_pt_measure.hide()
-
-            if self.cf.show_layer_complete:
-                if self.rs.mouse_down_point:
-                    self.rs.mouse_up_point = point_xy
-                    # mouse-down == mouse-up ➜ simple click, no rect
-                    if self.rs.mouse_up_point == self.rs.mouse_down_point:
-                        # buffer with 1 percent of the current canvas-Extent
-                        buffer_width = (self.iface.mapCanvas().extent().xMaximum() - self.iface.mapCanvas().extent().xMinimum()) * 0.01
-                        buffer_height = (self.iface.mapCanvas().extent().yMaximum() - self.iface.mapCanvas().extent().yMinimum()) * 0.01
-                        rect = qgis.core.QgsRectangle(self.rs.mouse_up_point.x() - buffer_width, self.rs.mouse_up_point.y() - buffer_height, self.rs.mouse_up_point.x() + buffer_width, self.rs.mouse_up_point.y() + buffer_height)
-                    else:
-                        rect = qgis.core.QgsRectangle(self.rs.mouse_down_point.x(), self.rs.mouse_down_point.y(), self.rs.mouse_up_point.x(), self.rs.mouse_up_point.y())
-
-                    tr = qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.showLyr.crs(), qgis.core.QgsProject.instance())
-                    projected_rect = tr.transformBoundingBox(rect)
-
-                    request = qgis.core.QgsFeatureRequest()
-                    request.setFilterRect(projected_rect)
-                    request.setFlags(qgis.core.QgsFeatureRequest.ExactIntersect)
-
-                    new_selected_pks = []
-                    for feature in self.ds.showLyr.getFeatures(request):
-                        new_selected_pks.append(feature[self.ds.showLyrBackReferenceField.name()])
-
-                    if len(new_selected_pks) > 0:
-
-                        # like implemented in QGis-Select-Features:
-                        if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
-                            # remove from Selection
-                            for new_pk in new_selected_pks:
-                                if new_pk in self.rs.selected_pks:
-                                    self.rs.selected_pks.remove(new_pk)
-                        elif QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-                            # add to selection
-                            for new_pk in new_selected_pks:
-                                self.rs.selected_pks.append(new_pk)
-                        else:
-                            # replace selection
-                            self.rs.selected_pks = new_selected_pks
-
-                        # make unique
-                        self.rs.selected_pks = list(dict.fromkeys(self.rs.selected_pks))
-
-                        # validate self.rs.selected_pks and select features:
-                        data_fids = []
-                        show_fids = []
-                        for edit_pk in self.rs.selected_pks:
-                            data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-                            if data_feature:
-                                data_fids.append(data_feature.id())
-
-                            show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
-                            if show_feature and show_feature.isValid():
-                                show_fids.append(show_feature.id())
-                        self.ds.showLyr.removeSelection()
-                        self.ds.showLyr.select(show_fids)
-                        self.ds.dataLyr.removeSelection()
-                        self.ds.dataLyr.select(data_fids)
             else:
-                self.push_messages(warning_msg=QtCore.QCoreApplication.translate('PolEvt', "Missing requirements: No Show-Layer configured..."))
-            self.rb_selection_rect.hide()
-            self.rs.mouse_down_point = None
-            self.rs.mouse_up_point = None
-            self.dlg_refresh_feature_selection_section()
-        elif self.rs.tool_mode == 'measuring':
-            snap_filter = tools.MyToolFunctions.OneLayerFilter(self.ds.refLyr)
-            m = self.iface.mapCanvas().snappingUtils().snapToMap(event.pos(), snap_filter)
-            if self.snap_indicator.match().type():
-                snapped_point_xy = self.snap_indicator.match().point()
-                snapped_point_geom = qgis.core.QgsGeometry.fromPointXY(snapped_point_xy)
-                snapped_ref_fid = m.featureId()
-                if self.iface.mapCanvas().mapSettings().destinationCrs() != self.ds.refLyr.crs():
-                    snapped_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
-                if snapped_point_geom and snapped_point_geom.asPoint():
-                    self.rs.snapped_ref_fid = snapped_ref_fid
-                    snapped_ref_geom = self.ds.refLyr.getFeature(m.featureId()).geometry()
-                    self.rs.current_measure = snapped_ref_geom.lineLocatePoint(snapped_point_geom)
-                    self.snap_indicator.setVisible(False)
-                    self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                    self.draw_reference_geom(self.rs.snapped_ref_fid)
-                    self.dlg_show_measure(self.rs.snapped_ref_fid, self.rs.current_measure)
+                # or any layer type vector, point, non-virtual, because the user
+                # might export the slow virtual-layer to file-based layer
+                # or use a database-driven view
+                # self.system_vs |= self.SVS.SHOW_LAYER_EXISTS
+                pass
 
-            # exits this tool-mode, also if no snap occured, showing only the map-x-y-coords for copy&paste f.e.
-            self.check_settings('after_measure')
-            self.dlg_refresh_measure_section()
-            self.dlg_refresh_edit_section()
+            if self.SVS.SHOW_LAYER_EXISTS in self.system_vs:
+                self.stored_settings.showLyrId = show_layer.id()
+                self.derived_settings.showLyr = show_layer
 
-    def canvasPressEvent(self, event: qgis.gui.QgsMapMouseEvent) -> None:
-        """mouseDown on canvas
+                self.sys_connect_layer_slot(show_layer, 'displayExpressionChanged', self.sys_layer_slot)
+                self.sys_connect_layer_slot(show_layer, 'subsetStringChanged', self.sys_layer_slot)
+                # detect manual edits on virtual query on this layer
+                self.sys_connect_layer_slot(show_layer, 'dataSourceChanged', self.sys_layer_slot)
+                self.system_vs |= self.SVS.SHOW_LAYER_CONNECTED
 
-        .. Note::
-            most actions will be triggered by canvasReleaseEvent
+    def dlg_refresh_qcbn_reference_feature(self):
+        """re-populates the QComboBoxN with the List of Reference-Layer-Features"""
+        # Rev. 2024-08-06
+        if self.my_dialog:
+            self.my_dialog.qcbn_reference_feature.blockSignals(True)
+            self.my_dialog.qlbl_selected_reference_layer.clear()
+            self.my_dialog.qcbn_reference_feature.clear()
 
-        :param event:
+            if self.derived_settings.refLyr:
+                self.my_dialog.qlbl_selected_reference_layer.setText(self.derived_settings.refLyr.name() + ' (' + self.derived_settings.refLyr.wkbType().name + ')')
+                # and self.stored_settings.lrMode == 'Mabs'
+                if self.SVS.REFERENCE_LAYER_M_ENABLED in self.system_vs:
+                    self.my_dialog.qcbn_reference_feature.col_names = ['FID', 'Display-Name', 'Length', 'first-M', 'last-M']
+                else:
+                    self.my_dialog.qcbn_reference_feature.col_names = ['FID', 'Display-Name', 'Length']
+
+                in_model = QtGui.QStandardItemModel(0, 3)
+
+                ref_context = qgis.core.QgsExpressionContext()
+                ref_display_exp = qgis.core.QgsExpression(self.derived_settings.refLyr.displayExpression())
+                for ref_feature in self.derived_settings.refLyr.getFeatures():
+
+                    ref_fid = ref_feature.id()
+
+                    items = {}
+                    items[0] = QtGui.QStandardItem()
+                    items[0].setData(ref_fid, 0)
+                    items[0].setData(ref_fid, self.ref_fid_role)
+
+                    items[1] = QtGui.QStandardItem()
+
+                    ref_context.setFeature(ref_feature)
+                    display_exp = ref_display_exp.evaluate(ref_context)
+
+                    if display_exp == ref_fid or isinstance(display_exp, QtCore.QVariant):
+                        items[1].setText(f"# {ref_fid}")
+                    else:
+                        items[1].setText(f"{display_exp}")
+
+                    items[2] = QtGui.QStandardItem()
+                    items[2].setData(ref_feature.geometry().length(), 0)
+                    # and self.stored_settings.lrMode == 'Mabs'
+                    if self.SVS.REFERENCE_LAYER_M_ENABLED in self.system_vs:
+
+                        first_vertex_m, last_vertex_m, error_msg = tools.MyTools.get_first_last_vertex_m(ref_feature.geometry())
+                        if not error_msg:
+                            items[3] = QtGui.QStandardItem()
+                            items[3].setData(first_vertex_m, 0)
+                            items[4] = QtGui.QStandardItem()
+                            items[4].setData(last_vertex_m, 0)
+
+                        geom_m_valid, error_msg = tools.MyTools.check_geom_m_valid(ref_feature.geometry())
+                        if not geom_m_valid:
+                            for ic in items:
+                                items[ic].setForeground(QtGui.QColor('red'))
+                                items[ic].setToolTip(MY_DICT.tr('reference_geom_not_m_valid', ref_feature.id(), error_msg))
+
+                    in_model.appendRow(items.values())
+
+                self.my_dialog.qcbn_reference_feature.set_model(in_model)
+
+                if self.session_data.current_ref_fid is not None:
+                    self.my_dialog.qcbn_reference_feature.select_by_value(0, self.ref_fid_role, self.session_data.current_ref_fid)
+
+            self.my_dialog.qcbn_reference_feature.blockSignals(False)
+
+    def sys_create_data_layer(self):
+        """create a geometry-less GeoPackage-layer for storing the linear-references
+
+        fid-column (auto-incremented integer)
+        join-column to reference-layer (type dependend on reference-layer id-field-type)
+        numerical columns for from stationing
+
+        register this layer for plugin usage
         """
-        # Rev. 2023-05-03
-        point_xy = self.iface.mapCanvas().getCoordinateTransform().toMapCoordinates(event.x(), event.y())
+        # Rev. 2024-08-06
 
-        if self.rs.tool_mode == 'before_move_point':
-            if self.cf.measure_completed:
-                self.draw_edit_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-                ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-                ref_projected_point_geom = qgis.core.QgsGeometry.fromPointXY(point_xy)
-                ref_projected_point_geom.transform(qgis.core.QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), self.ds.refLyr.crs(), qgis.core.QgsProject.instance()))
+        # Note:
+        # field-names for the here created sample-data-layer are hard-coded and language independend
+        # but the aliases registered below are language dependend
+        id_field_name = 'fid'
+        reference_field_name = 'reference_id'
+        stationing_field_name = 'stationing'
 
-                # see https://qgis.org/pyqgis/master/core/QgsGeometry.html#qgis.core.QgsGeometry.closestSegmentWithContext
-                # returns tuple: (sqrDist, minDistPoint, nextVertexIndex, leftOrRightOfSegment)
-                point_on_line = ref_feature.geometry().closestSegmentWithContext(ref_projected_point_geom.asPoint())
-                current_measure = ref_feature.geometry().lineLocatePoint(qgis.core.QgsGeometry.fromPointXY(point_on_line[1]))
-                self.rs.current_measure = self.rs.last_measure = current_measure
-
-                self.show_measure_in_dialogue(self.rs.current_measure)
-                self.show_measure_fract_in_dialogue(self.rs.current_measure / ref_feature.geometry().length())
-                self.draw_measured_point(self.rs.snapped_ref_fid, self.rs.current_measure)
-
-                self.check_settings('move_point')
-
-        elif self.rs.tool_mode == 'select_features':
-            # store self.rs.mouse_down_point as start-point for the feature-selection-rect
-            if event.button() == QtCore.Qt.LeftButton:
-                self.rs.mouse_up_point = None
-                self.rs.mouse_down_point = self.iface.mapCanvas().getCoordinateTransform().toMapCoordinates(event.x(), event.y())
-
-    def s_create_data_layer(self):
-        """create a GeoPackage-"layer" (geometry-less) for storing the linear-references"""
-        # Rev. 2023-05-03
-        try_it = True
-        critical_msg = ''
-        success_msg = ''
-        info_msg = ''
-        warning_msg = ''
-        # self.ds.refLyrPkField, necessary because the type of the created Reference-field must fit to the referenced primary-key-field
-        if self.ds.refLyrPkField:
+        # self.derived_settings.refLyrIdField, necessary because the type of the created Reference-field must fit to the referenced primary-key-field
+        if self.SVS.REFERENCE_LAYER_COMPLETE in self.system_vs:
             # file-dialog for the GeoPackage
             dialog = QtWidgets.QFileDialog()
             dialog.setFileMode(QtWidgets.QFileDialog.AnyFile)
@@ -2447,7 +5039,7 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             dialog.setOption(QtWidgets.QFileDialog.DontConfirmOverwrite, True)
             dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptOpen)
             dialog.setNameFilter("geoPackage (*.gpkg)")
-            dialog.setWindowTitle(QtCore.QCoreApplication.translate('PolEvt', "LinearReferencing: Create Point-on-Line-Data-Layer"))
+            dialog.setWindowTitle(MY_DICT.tr('create_data_layer'))
             dialog.setDefaultSuffix("gpkg")
             result = dialog.exec()
             filenames = dialog.selectedFiles()
@@ -2455,822 +5047,882 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             if result:
                 gpkg_path = filenames[0]
 
-                # only three necessary fields
-                data_lyr_fid_field = qgis.core.QgsField("fid", QtCore.QVariant.Int)
-                data_lyr_reference_field = qgis.core.QgsField("line_ref_id", self.ds.refLyrPkField.type())
-                data_lyr_measure_field = qgis.core.QgsField("measure", QtCore.QVariant.Double)
-
-                fields = qgis.core.QgsFields()
-                fields.append(data_lyr_fid_field)
-                fields.append(data_lyr_reference_field)
-                fields.append(data_lyr_measure_field)
-
-                options = qgis.core.QgsVectorFileWriter.SaveVectorOptions()
-                options.driverName = "gpkg"
-
                 # already used names in project...
                 used_layer_names = [layer.name() for layer_id, layer in qgis.core.QgsProject.instance().mapLayers().items()]
                 if os.path.isfile(gpkg_path):
                     # ... and existing GeoPackage
                     used_layer_names += [lyr.GetName() for lyr in osgeo.ogr.Open(gpkg_path)]
-                    options.actionOnExistingFile = qgis.core.QgsVectorFileWriter.CreateOrOverwriteLayer
 
                 # unique name for the table/layer within project and GeoPackage:
-                table_name = tools.MyToolFunctions.get_unique_layer_name(used_layer_names, 'PointOnLine_Data_Layer_{curr_i}', '1')
+                suggested_table_name = tools.MyTools.get_unique_string(used_layer_names, 'PoL_Data_Layer_{curr_i}', 1)
 
-                table_name, ok = QtWidgets.QInputDialog.getText(None, f"LinearReferencing ({gdp()})", QtCore.QCoreApplication.translate('PolEvt', "Name for table in GeoPackage:"), QtWidgets.QLineEdit.Normal, table_name)
+                table_name, ok = QtWidgets.QInputDialog.getText(
+                    None,
+                    f"LinearReferencing ({get_debug_pos()})",
+                    MY_DICT.tr('name_for_table_in_gpkg'),
+                    QtWidgets.QLineEdit.Normal,
+                    suggested_table_name
+                )
                 if not ok or not table_name:
-                    info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user")
-                    try_it = False
+                    return
                 elif table_name in used_layer_names:
 
                     dialog_result = QtWidgets.QMessageBox.question(
                         None,
-                        "LinearReferencing",
-                        qt_format(QtCore.QCoreApplication.translate('PolEvt', "Replace table {apos}{0}{apos} in GeoPackage {apos}{1}{apos}?"),table_name, gpkg_path),
+                        f"LinearReferencing ({get_debug_pos()})",
+                        MY_DICT.tr('replace_table_in_gpkg', table_name),
                         buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
                         defaultButton=QtWidgets.QMessageBox.Yes
                     )
 
-                    if dialog_result == QtWidgets.QMessageBox.Yes:
-                        try_it = True
+                    if dialog_result != QtWidgets.QMessageBox.Yes:
+                        return
+
+                fields = qgis.core.QgsFields()
+                # necessary fields
+
+                # Note 1:
+                # "fid" ist the default-name in GPKG for Feature-ID (Primary key, integer, auto-increment)
+                # if not listed in the field-list it is automatically created
+                # if listed it is automatically used
+                # to use any other integer column add 'options.layerOptions = ["FID=any_other_integer_column_name"]'
+                # see https://gdal.org/drivers/vector/gpkg.html#layer-creation-options
+
+                # Note 2: since 3.38 new signature for QgsField-constructor, see https://api.qgis.org/api/classQgsField.html
+                # The use of QVariant for the field-type is deprecated, QMetaType is used instead
+                # https://doc.qt.io/qt-5/qmetatype.html#Type-enum
+                # old -> new:
+                # QtCore.QVariant.Int -> QtCore.QMetaType.Type.Int
+                # QtCore.QVariant.Double -> QtCore.QMetaType.Type.Double
+                # QtCore.QVariant.String -> QtCore.QMetaType.Type.QString (!)
+
+                # Note 3: the enum-integer-value seem to be the same, print(QtCore.QVariant.Int, QtCore.QMetaType.Type.Int) => 2 2
+
+                try:
+                    # QGis > 3.34
+                    fields.append(qgis.core.QgsField(id_field_name, QtCore.QMetaType.Int))
+                except Exception as e:
+                    # QGis 3.34 LTR
+                    fields.append(qgis.core.QgsField(id_field_name, QtCore.QVariant.Int))
+
+                # same type as refLyrIdField
+                fields.append(qgis.core.QgsField(reference_field_name, self.derived_settings.refLyrIdField.type()))
+
+                try:
+                    fields.append(qgis.core.QgsField(stationing_field_name, QtCore.QMetaType.Double))
+                except Exception as e:
+                    fields.append(qgis.core.QgsField(stationing_field_name, QtCore.QVariant.Double))
+
+                options = qgis.core.QgsVectorFileWriter.SaveVectorOptions()
+                options.driverName = "gpkg"
+
+                # stupid implementation, but else error "Opening of data source in update mode failed..."
+                if not os.path.exists(gpkg_path):
+                    options.actionOnExistingFile = qgis.core.QgsVectorFileWriter.CreateOrOverwriteFile
+                else:
+                    options.actionOnExistingFile = qgis.core.QgsVectorFileWriter.CreateOrOverwriteLayer
+
+                options.layerName = table_name
+                # geometry-less table needs anyway three Dummy-Attributes for geometrie-type, projection and transformation
+                writer = qgis.core.QgsVectorFileWriter.create(
+                    gpkg_path,
+                    fields,
+                    qgis.core.QgsWkbTypes.NoGeometry,
+                    qgis.core.QgsCoordinateReferenceSystem(""),  # dummy
+                    qgis.core.QgsCoordinateTransformContext(),
+                    options
+                )
+                # creates a SQLite/SpatialLite-table with such query:
+                # CREATE TABLE "LR_Points_Data_25" ( "fid" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "reference_id" INTEGER, "stationing_n" REAL)
+                if writer.hasError() == qgis.core.QgsVectorFileWriter.NoError:
+                    # Important:
+                    # "del writer" *before* "addVectorLayer"
+                    # seems to be necessary, else gpkg exists, but created layer not valid
+                    # perhaps layer is physically created after "del writer"?
+                    del writer
+
+                    uri = gpkg_path + '|layername=' + table_name
+                    data_lyr = self.iface.addVectorLayer(uri, table_name, "ogr")
+
+                    if data_lyr and data_lyr.isValid():
+
+                        # language-dependend aliases for tables and forms
+                        data_lyr.setFieldAlias(data_lyr.fields().indexOf(id_field_name), MY_DICT.tr('id_field_alias'))
+                        data_lyr.setFieldAlias(data_lyr.fields().indexOf(reference_field_name), MY_DICT.tr('reference_id_field_alias'))
+                        data_lyr.setFieldAlias(data_lyr.fields().indexOf(stationing_field_name), MY_DICT.tr('stationing_field_alias'))
+
+                        # field-constraints only affect the forms, not for inserts from table
+                        data_lyr.setFieldConstraint(data_lyr.fields().indexOf(id_field_name), qgis.core.QgsFieldConstraints.Constraint.ConstraintUnique)
+                        data_lyr.setFieldConstraint(data_lyr.fields().indexOf(id_field_name), qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
+                        data_lyr.setFieldConstraint(data_lyr.fields().indexOf(reference_field_name), qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
+                        data_lyr.setFieldConstraint(data_lyr.fields().indexOf(stationing_field_name), qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
+
+                        # convenience to avoid manual edits:
+                        # make field 0, dataLyrIdField/fid, readOnly,
+                        # setting is applied to feature-form and attribute-table, but can be changed by user in layer-properties
+                        # see  additional check in lsl_data_layer_attribute_value_changed
+                        form_config = data_lyr.editFormConfig()
+                        form_config.setReadOnly(0, True)
+                        data_lyr.setEditFormConfig(form_config)
+
+                        self.stored_settings.dataLyrId = data_lyr.id()
+                        self.stored_settings.dataLyrIdFieldName = id_field_name
+                        self.stored_settings.dataLyrReferenceFieldName = reference_field_name
+                        self.stored_settings.dataLyrStationingFieldName = stationing_field_name
+
+                        self.sys_check_settings()
+                        self.dlg_refresh_layer_settings_section()
+                        self.dlg_refresh_feature_selection_section()
+
+                        self.dlg_append_log_message('SUCCESS', MY_DICT.tr('data_layer_created', f"{gpkg_path}.{table_name}"))
+
+                        self.sys_create_show_layer()
+
+                        # convenience
+                        self.derived_settings.dataLyr.startEditing()
+                        self.iface.setActiveLayer(self.derived_settings.dataLyr)
+
+                        self.my_dialog.tbw_central.setCurrentIndex(0)
+
                     else:
-                        info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user")
-                        try_it = False
+                        # if for example the GeoPackage is exclusively accessed by "DB Browser for SQLite"...
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('error_creating_layer', f"{gpkg_path}.{table_name}", 'created layer not valid'))
 
-                if try_it:
-                    options.layerName = table_name
-                    # geometry-less table needs anyway three Dummy-Attributes for geometrie-type, projection and transformation
-                    writer = qgis.core.QgsVectorFileWriter.create(
-                        gpkg_path,
-                        fields,
-                        qgis.core.QgsWkbTypes.NoGeometry,
-                        qgis.core.QgsCoordinateReferenceSystem(""),  # dummy
-                        qgis.core.QgsCoordinateTransformContext(),
-                        options
-                    )
-                    # creates a SQLite/SpatialLite-table with such query:
-                    # CREATE TABLE "LR_Points_Data_25" ( "fid" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "reference_id" INTEGER, "measure" REAL)
-                    if writer.hasError() == qgis.core.QgsVectorFileWriter.NoError:
-                        # Important:
-                        # "del writer" *before* "addVectorLayer"
-                        # seems to be is necessary
-                        # else layer is not valid
-                        # perhaps layer is physically created after "del writer"?
-                        del writer
-
-                        uri = gpkg_path + '|layername=' + table_name
-                        data_lyr = self.iface.addVectorLayer(uri, table_name, "ogr")
-
-                        if data_lyr and data_lyr.isValid():
-                            data_lyr.setFieldConstraint(0, qgis.core.QgsFieldConstraints.Constraint.ConstraintUnique)
-                            data_lyr.setFieldConstraint(0, qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
-                            data_lyr.setFieldConstraint(1, qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
-                            data_lyr.setFieldConstraint(2, qgis.core.QgsFieldConstraints.Constraint.ConstraintNotNull)
-
-                            self.ss.dataLyrId = data_lyr.id()
-                            self.ss.dataLyrIdFieldName = data_lyr_fid_field.name()
-                            self.ss.dataLyrReferenceFieldName = data_lyr_reference_field.name()
-                            self.ss.dataLyrMeasureFieldName = data_lyr_measure_field.name()
-
-                            self.connect_data_layer(data_lyr)
-                            self.check_settings()
-                            self.dlg_refresh_layer_settings_section()
-                            self.dlg_refresh_feature_selection_section()
-                            self.resume_measure()
-
-                            success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "create table {apos}{0}{apos}.{apos}{1}{apos} successful"),gpkg_path, table_name)
-                        else:
-                            # if for example the GeoPackage is exclusively accessed by "DB Browser for SQLite"...
-                            critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Error creating Data-Layer {apos}{0}{apos}.{apos}{1}{apos}, created layer not valid"),gpkg_path, table_name)
-
-                    else:
-                        # perhaps write-permission?
-                        critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Error creating Data-Layer {apos}{0}{apos}.{apos}{1}{apos}:{br}{2}"),gpkg_path, table_name, writer.errorMessage())
+                else:
+                    # perhaps write-permission?
+                    self.dlg_append_log_message('WARNING', MY_DICT.tr('error_creating_layer', f"{gpkg_path}.{table_name}", writer.errorMessage()))
         else:
-            critical_msg = QtCore.QCoreApplication.translate('PolEvt', "missing requirements...")
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('reference_layer_missing'))
 
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
-
-    def s_create_show_layer(self):
-        """create a virtual layer gcombining the Data-Layer and the Reference-Layer"""
-        # Rev. 2023-05-03
-        critical_msg = ''
-        success_msg = ''
-        info_msg = ''
-        warning_msg = ''
-        if self.cf.reference_layer_complete and self.cf.data_layer_complete:
-
+    def sys_create_show_layer(self):
+        """create and register virtual layer combining Data- and Reference-Layer"""
+        # Rev. 2024-08-06
+        if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+            # unique name for the virtual layer within project,
+            # include current lrMode for convenience
             layer_names = [layer.name() for layer in qgis.core.QgsProject.instance().mapLayers().values()]
-            layer_name = tools.MyToolFunctions.get_unique_layer_name(layer_names, "PointOnLine_Show_Layer_{curr_i}", '1')
+            template = f"PoL_Show_Layer_{self.stored_settings.lrMode}_{{curr_i}}"
+            show_layer_name = tools.MyTools.get_unique_string(layer_names, template, 1)
 
-            # unique name for the  virtual layer within project
-            layer_name, ok = QtWidgets.QInputDialog.getText(None, f"LinearReferencing ({gdp()})", QtCore.QCoreApplication.translate('PolEvt', "Name for virtual Show-Layer:"), QtWidgets.QLineEdit.Normal, layer_name)
-            if ok and layer_name:
-                show_lyr_sql = "SELECT"
-                field_sql_lst = []
+            show_lyr_sql = "SELECT"
+            field_sql_lst = []
+            # only the necessary attributes of Data-Layer are included, the other come via join
+            # the field-names are taken from the registered data-layer, they must not correspond to the default names used in sys_create_data_layer
+            field_sql_lst.append(f" data_lyr.{self.derived_settings.dataLyrIdField.name()}")
+            field_sql_lst.append(f" data_lyr.{self.derived_settings.dataLyrReferenceField.name()}")
+            field_sql_lst.append(f" data_lyr.{self.derived_settings.dataLyrStationingField.name()}")
 
-                # only the necessary attributes of Data-Layer are included, the other come via join
-                field_sql_lst.append(f" data_lyr.{self.ds.dataLyrIdField.name()} as \"{self.ds.dataLyrIdField.name()}\"")
-                field_sql_lst.append(f" data_lyr.{self.ds.dataLyrReferenceField.name()} as \"{self.ds.dataLyrReferenceField.name()}\"")
-                field_sql_lst.append(f" data_lyr.{self.ds.dataLyrMeasureField.name()} as \"{self.ds.dataLyrMeasureField.name()}\"")
+            # Geometry-Expression with "special comment" according https://docs.qgis.org/testing/en/docs/user_manual/managing_data_source/create_layers.html#creating-virtual-layers
+            # ST_Line_Substring and ST_Locate_Between_Measures require from-stationing <= to_stationing, else no result-geometry
+            # N-stationing can be done with multi-linestring-geometries, if geometries are either single-parted or multi-parted but without gaps
+            # Note: Shape-files are allways multi-type-layers (with mostly single-type geometries)
+            point_geom_alias = 'point_geom_' + self.stored_settings.lrMode
+            if self.stored_settings.lrMode == 'Nabs':
 
-                # Problem/Bug only under windows:
-                # if dataLyr has no records ➜ show_lyr.renderer() == None
-                # Workaround:
-                # Geometry-Expression with "special comment" according https://docs.qgis.org/testing/en/docs/user_manual/managing_data_source/create_layers.html#creating-virtual-layers
-                # Bug?
-                field_sql_lst.append(f" ST_Line_Interpolate_Point(ref_lyr.geometry, data_lyr.\"{self.ds.dataLyrMeasureField.name()}\"/st_length(ref_lyr.geometry)) as point_geom /*:point:{self.ds.refLyr.crs().postgisSrid()}*/")
-                show_lyr_sql += ',\n'.join(field_sql_lst)
-                show_lyr_sql += f"\nFROM  \"{self.ds.dataLyr.id()}\" as data_lyr"
-                show_lyr_sql += f"\n  INNER JOIN \"{self.ds.refLyr.id()}\" as ref_lyr"
-                integer_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong]
-                if self.ds.dataLyrReferenceField.type() in integer_field_types:
-                    show_lyr_sql += f" ON data_lyr.\"{self.ss.dataLyrReferenceFieldName}\" = ref_lyr.\"{self.ds.refLyrPkField.name()}\""
-                else:
-                    # needed with non-integer join-fields,
-                    # makes the query/layer *very* slow, presumably because of missing indexes?
-                    # ➜ better avoid non-integer PKs
-                    show_lyr_sql += f" ON (data_lyr.\"{self.ss.dataLyrReferenceFieldName}\" = ref_lyr.\"{self.ds.refLyrPkField.name()}\") = True"
+                field_sql_lst.append(f"""
 
-                # urllib.parse.quote
-                # https://docs.python.org/3/library/urllib.parse.html
-                # not necessary
-                # show_lyr_sql_q = urllib.parse.quote(show_lyr_sql)
+                ST_Line_Interpolate_Point(
+                    st_linemerge(ref_lyr.geometry), 
+                    data_lyr.'{self.derived_settings.dataLyrStationingField.name()}'/st_length(st_linemerge(ref_lyr.geometry))
+                ) as {point_geom_alias} /*:point:{self.derived_settings.refLyr.crs().postgisSrid()}*/""")
 
-                uri = f"?query={show_lyr_sql}"
-
-                # set uid-Field for virtual Layer via "&uid="
-                # only for integer-PKs
-                # advantage: no artificial fid used, feature.id() returns this value
-                # if the Name of a string-PK would be used for that param
-                # ➜ no error
-                # ➜ the layer will show in canvas
-                # ➜ but the associated table has only *one* record
-                if self.ds.dataLyrIdField.type() in integer_field_types:
-                    uri += f"&uid={self.ds.dataLyrIdField.name()}"
-
-                # &geometry=alias used in show_lyr_sql
-                # :1: ➜ point
-                # {epsg} ➜ same as Reference-Layer
-                # anyway under windows:
-                # the "Virtual Layer Dialog shows for "Geometry" allways "Autodetect" instead "Manually defined", so the whole
-                # "&geometry=point_geom:Point:25832"-part seems to be ignored
-                uri += f"&geometry=point_geom:point:{self.ds.refLyr.crs().postgisSrid()}"
-
-                show_lyr = qgis.core.QgsVectorLayer(uri, layer_name, "virtual")
-
-                if show_lyr and show_lyr.renderer():
-                    qvl_join_data_lyr = qgis.core.QgsVectorLayerJoinInfo()
-                    qvl_join_data_lyr.setJoinLayer(self.ds.dataLyr)
-                    qvl_join_data_lyr.setJoinFieldName(self.ds.dataLyrIdField.name())
-                    qvl_join_data_lyr.setTargetFieldName(self.ds.dataLyrIdField.name())
-                    qvl_join_data_lyr.setUsingMemoryCache(True)
-                    show_lyr.addJoin(qvl_join_data_lyr)
-
-                    qvl_join_ref_lyr = qgis.core.QgsVectorLayerJoinInfo()
-                    qvl_join_ref_lyr.setJoinLayer(self.ds.refLyr)
-                    qvl_join_ref_lyr.setJoinFieldName(self.ds.refLyrPkField.name())
-                    qvl_join_ref_lyr.setTargetFieldName(self.ds.dataLyrReferenceField.name())
-                    qvl_join_ref_lyr.setUsingMemoryCache(True)
-                    show_lyr.addJoin(qvl_join_ref_lyr)
-
-                    atc = show_lyr.attributeTableConfig()
-
-                    # remove duplicates, these fields are almost queried in virtual-layer-uri
-                    hide_field_names = [
-                        f"{self.ds.dataLyr.name()}_{self.ds.dataLyrIdField.name()}",
-                        f"{self.ds.dataLyr.name()}_{self.ds.dataLyrReferenceField.name()}",
-                        f"{self.ds.dataLyr.name()}_{self.ds.dataLyrMeasureField.name()}"
-                    ]
-
-                    columns = atc.columns()
-                    for column in columns:
-                        if column.name in hide_field_names:
-                            column.hidden = True
-
-                    atc.setColumns(columns)
-
-                    show_lyr.setAttributeTableConfig(atc)
-
-                    show_lyr.renderer().symbol().setSizeUnit(qgis.core.QgsUnitTypes.RenderUnit.RenderPixels)
-                    show_lyr.renderer().symbol().setSize(6)
-                    show_lyr.renderer().symbol().setColor(QtGui.QColor("orange"))
-                    show_lyr.renderer().symbol().setOpacity(0.8)
-
-                    show_lyr.setCrs(self.ds.refLyr.crs())
-                    show_lyr.updateExtents()
-                    qgis.core.QgsProject.instance().addMapLayer(show_lyr)
-                    self.ss.showLyrBackReferenceFieldName = self.ds.dataLyrIdField.name()
-                    self.connect_show_layer(show_lyr)
-                    self.check_settings()
-                    self.dlg_refresh_layer_settings_section()
-                    self.dlg_refresh_feature_selection_section()
-                    self.resume_measure()
-
-                    success_msg = QtCore.QCoreApplication.translate('PolEvt', "Virtual layer created and added...")
-
-                else:
-                    critical_msg = QtCore.QCoreApplication.translate('PolEvt', "Error creating virtual layer...")
+            elif self.stored_settings.lrMode == 'Nfract':
+                # same as above, but stationings as fractions of reference-line-length, so no need for "/st_length(st_linemerge(ref_lyr.geometry))"
+                field_sql_lst.append(f"""
+                ST_Line_Interpolate_Point(
+                    ST_LineMerge(ref_lyr.geometry), 
+                    data_lyr.'{self.derived_settings.dataLyrStationingField.name()}'
+                ) as {point_geom_alias} /*:point:{self.derived_settings.refLyr.crs().postgisSrid()}*/""")
+            elif self.stored_settings.lrMode == 'Mabs':
+                # ST_TrajectoryInterpolatePoint(geom, measure) => get M-interpolated point, if the reference-line "IsValidTrajectory" (single-parted with strict ascending M-values)
+                field_sql_lst.append(f"""
+                ST_TrajectoryInterpolatePoint(
+                    ref_lyr.geometry,
+                    data_lyr.'{self.derived_settings.dataLyrStationingField.name()}'
+                ) as {point_geom_alias} /*:point:{self.derived_settings.refLyr.crs().postgisSrid()}*/""")
             else:
-                info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user")
+                raise NotImplementedError(f"lr_mode '{self.stored_settings.lrMode}' not implemented")
+
+            show_lyr_sql += ',\n'.join(field_sql_lst)
+            show_lyr_sql += f"\nFROM  '{self.derived_settings.dataLyr.id()}' as data_lyr"
+            show_lyr_sql += f"\n  INNER JOIN '{self.derived_settings.refLyr.id()}' as ref_lyr"
+            integer_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong]
+            if self.derived_settings.dataLyrReferenceField.type() in integer_field_types:
+                show_lyr_sql += f" ON data_lyr.'{self.stored_settings.dataLyrReferenceFieldName}' = ref_lyr.'{self.derived_settings.refLyrIdField.name()}'"
+            else:
+                # needed with non-integer join-fields, bug?
+                # makes the query/layer *very* slow, presumably because of missing indexes?
+                # -> better avoid non-integer PKs
+                show_lyr_sql += f" ON (data_lyr.'{self.stored_settings.dataLyrReferenceFieldName}' = ref_lyr.'{self.derived_settings.refLyrIdField.name()}') = True"
+
+            # note:
+            # layer is valid without urllib.parse.quote, but cl.dataProvider().uri().uri() returns only a partial query
+            # Virtual layers created manually via QGis "Create virtual layer"/"Edit virtual layer"-tools are quoted, surprisingly only *partially* for field identifiers and linebreaks
+            # uri = f"?query={show_lyr_sql}"
+            uri = f"?query={urllib.parse.quote(show_lyr_sql)}"
+
+            if self.derived_settings.dataLyrIdField.type() in integer_field_types:
+                uri += f"&uid={self.derived_settings.dataLyrIdField.name()}"
+
+            uri += f"&geometry={point_geom_alias}:point:{self.derived_settings.refLyr.crs().postgisSrid()}"
+
+            show_lyr = qgis.core.QgsVectorLayer(uri, show_layer_name, "virtual")
+            if show_lyr and show_lyr.renderer():
+
+                # Join Data-Layer
+                qvl_join_data_lyr = qgis.core.QgsVectorLayerJoinInfo()
+                qvl_join_data_lyr.setJoinLayer(self.derived_settings.dataLyr)
+                qvl_join_data_lyr.setJoinFieldName(self.derived_settings.dataLyrIdField.name())
+                # 1:1 join, using the identical field-name
+                self.stored_settings.showLyrBackReferenceFieldName = self.derived_settings.dataLyrIdField.name()
+                qvl_join_data_lyr.setTargetFieldName(self.stored_settings.showLyrBackReferenceFieldName)
+                qvl_join_data_lyr.setUsingMemoryCache(True)
+                show_lyr.addJoin(qvl_join_data_lyr)
+
+                # Join Reference-Layer
+                qvl_join_ref_lyr = qgis.core.QgsVectorLayerJoinInfo()
+                qvl_join_ref_lyr.setJoinLayer(self.derived_settings.refLyr)
+                qvl_join_ref_lyr.setJoinFieldName(self.derived_settings.refLyrIdField.name())
+                qvl_join_ref_lyr.setTargetFieldName(self.derived_settings.dataLyrReferenceField.name())
+                qvl_join_ref_lyr.setUsingMemoryCache(True)
+                show_lyr.addJoin(qvl_join_ref_lyr)
+
+                # convenience: remove joined duplicates, these fields are almost queried in virtual-layer-uri
+                # Note: the aliased field-names from data-layer will stay visible, only the joined ones "table-name_field-name" will be hidden
+                atc = show_lyr.attributeTableConfig()
+                hide_field_names = [
+                    self.derived_settings.dataLyrReferenceField.name(),
+                    self.derived_settings.dataLyrStationingField.name()
+                ]
+
+                columns = atc.columns()
+                for column in columns:
+                    if column.name in hide_field_names:
+                        column.hidden = True
+
+                atc.setColumns(columns)
+
+                show_lyr.setAttributeTableConfig(atc)
+
+                show_lyr.renderer().symbol().setSizeUnit(qgis.core.QgsUnitTypes.RenderUnit.RenderPixels)
+                show_lyr.renderer().symbol().setSize(6)
+
+                show_lyr.renderer().symbol().setColor(QtGui.QColor(self.stored_settings.show_layer_default_point_color))
+                show_lyr.renderer().symbol().setOpacity(0.8)
+
+                # additional, should already be done by uri
+                show_lyr.setCrs(self.derived_settings.refLyr.crs())
+
+                qgis.core.QgsProject.instance().addMapLayer(show_lyr)
+
+                self.stored_settings.showLyrId = show_lyr.id()
+
+                self.sys_check_settings()
+                self.dlg_refresh_layer_settings_section()
+                self.dlg_refresh_feature_selection_section()
+                self.dlg_append_log_message('SUCCESS', MY_DICT.tr('show_layer_created', show_layer_name))
+            else:
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('error_creating_virtual_layer'))
+
         else:
-            warning_msg = QtCore.QCoreApplication.translate('PolEvt', "Please create or configure Reference- and Data-Layer")
+            self.dlg_append_log_message('INFO', MY_DICT.tr('reference_or_data_layer_missing'))
 
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
+    def s_update_stationing(self):
+        """
+            opens feature-form for edit_feature, replaces reference and stationing(s) with measure_feature
+            layer must be editable
+            edit_feature and measure_feature existing and measure_feature.is_valid == True
+            insert to edit-buffer is done by OK-click on feature-form
+            """
+        # Rev. 2024-08-06
+        # Check: Privileges sufficient and Layer in Edit-Mode
 
-    def s_resume_measure(self):
-        """slot for resume_measure"""
-        # Rev. 2023-05-26
-        self.resume_measure()
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_UPDATE_ENABLED) in self.system_vs:
+            if self.session_data.edit_feature is not None:
+                data_feature, error_msg = self.tool_get_data_feature(data_fid=self.session_data.edit_feature.data_fid)
 
-    def resume_measure(self):
-        """wrapper, resets some runtime-settings and dialog-widgets, hide temporal canvas-graphics, sets tool-mode 'measuring'"""
-        # Rev. 2023-04-29
-        self.rs.current_measure = None
-        self.rs.snapped_ref_fid = None
-        self.rs.mouse_down_point = None
-        self.rs.mouse_up_point = None
-        self.rs.edit_pk = None
+                if data_feature:
 
-        self.my_dialogue.le_edit_data_pk.clear()
-        self.vm_pt_measure.hide()
-        self.vm_pt_edit.hide()
-        self.rb_ref.hide()
-        self.check_settings('measuring')
-        self.dlg_refresh_measure_section()
-        self.dlg_refresh_edit_section()
-        self.my_dialogue.reset_measure_widgets()
-        self.iface.mapCanvas().setMapTool(self)
+                    if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+                        ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=self.session_data.measure_feature.ref_fid)
+                        if ref_feature:
+                            if ref_feature.hasGeometry():
 
-    def s_insert_feature(self):
-        """opens insert from with some prefilled contents, from which a new can be inserted to Data-Layer
-        data from any currently selected self.rs.edit_pk is cloned"""
-        # Rev. 2023-04-28
-        try_it = True
-        did_it = False
+                                if self.stored_settings.lrMode == 'Mabs':
+                                    geom_m_valid, error_msg = tools.MyTools.check_geom_m_valid(ref_feature.geometry())
+                                    if not geom_m_valid:
+                                        self.dlg_append_log_message('WARNING', MY_DICT.tr('note_reference_geom_not_m_valid', self.session_data.measure_feature.ref_fid, error_msg))
+                                else:
+                                    if ref_feature.geometry().constGet().partCount() > 1:
+                                        self.dlg_append_log_message('WARNING', MY_DICT.tr('note_reference_geom_multi_parted', self.session_data.measure_feature.ref_fid))
 
-        success_msg = ''
-        info_msg = ''
-        critical_msg = ''
-        warning_msg = ''
+                                stationing = 0
+                                if self.stored_settings.lrMode == 'Nabs':
+                                    stationing = self.session_data.measure_feature.snap_n_abs
+                                elif self.stored_settings.lrMode == 'Nfract':
+                                    stationing = self.session_data.measure_feature.snap_n_fract
+                                elif self.stored_settings.lrMode == 'Mabs':
+                                    stationing = self.session_data.measure_feature.snap_m_abs
+                                else:
+                                    raise NotImplementedError(f"lr_mode '{self.stored_settings.lrMode}' not implemented")
 
-        used_pk = None
+                                if self.stored_settings.storagePrecision >= 0:
+                                    stationing = round(stationing, self.stored_settings.storagePrecision)
 
-        if self.cf.insert_enabled:
-            if self.ds.dataLyr.isEditable():
-                if self.ds.dataLyr.isModified():
-                    dialog_result = QtWidgets.QMessageBox.question(
-                        None,
-                        f"LinearReferencing Add Feature ({gdp()})",
-                        qt_format(QtCore.QCoreApplication.translate('PolEvt', "{div_pre_1}Layer {apos}{0}{apos} is editable!{div_ml_1}[Yes]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session with save{br}[No]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session without save{br}[Cancel]{nbsp}{arrow} Quit...{div_ml_2}{div_pre_2}"),self.ds.dataLyr.name()),
-                        buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
-                        defaultButton=QtWidgets.QMessageBox.Yes
-                    )
+                                # Note: changes of the feature-attributes via feature.setAttribute(...,...) are possible, shown in feature-form, but not committed by click on the OK-Button
+                                # instead, the attribute-values have to be changed inside the form via feature_form.attributeForm().changeAttribute(...,...)
+                                feature_form = tools.MyTools.get_feature_form(self.iface, self.derived_settings.dataLyr, data_feature, False)
 
-                    if dialog_result == QtWidgets.QMessageBox.Yes:
-                        self.ds.dataLyr.commitChanges()
-                    elif dialog_result == QtWidgets.QMessageBox.No:
-                        self.ds.dataLyr.rollBack()
+                                feature_form.attributeForm().changeAttribute(self.derived_settings.dataLyrReferenceField.name(), ref_feature[self.derived_settings.refLyrIdField.name()])
+                                feature_form.attributeForm().changeAttribute(self.derived_settings.dataLyrStationingField.name(), stationing)
+
+                                feature_form.show()
+                            else:
+                                self.dlg_append_log_message('WARNING', MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
+                        else:
+                            self.dlg_append_log_message("WARNING", error_msg)
                     else:
-                        try_it = False
-                        info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
+                        # should not happen, because the insert-button would be disabled
+                        self.dlg_append_log_message('WARNING', MY_DICT.tr('no_measurement'))
                 else:
-                    self.ds.dataLyr.rollBack()
-
-            if try_it:
-                # Pre-Check the referenced Feature
-                ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-
-                if ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                    # Feierabend
-
-                    ref_layer_join_value = ref_feature[self.ds.refLyrPkField.name()]
-                    # check, if there is a valuable ID, because self.ds.refLyrPkField can be any field in this layer
-                    if ref_layer_join_value == '' or ref_layer_join_value is None or repr(ref_layer_join_value) == 'NULL':
-                        critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with ID {0} in layer {apos}{1}{apos} has no value in ID-field {apos}{2}{apos}"),self.rs.snapped_ref_fid, self.ds.refLyr.name(), self.ds.refLyrPkField.name())
-                        try_it = False
-
-                    if ref_feature.geometry().constGet().partCount() > 1:
-                        warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Geometry for feature ID {apos}{0}{apos} in Reference-Layer {apos}{1}{apos} is {2}-parted, Point-on-Line-geometry not calculable"),self.rs.snapped_ref_fid, self.ds.refLyr.name(), ref_feature.geometry().constGet().partCount())
-                else:
-                    critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "No Reference-feature with ID {apos}{0}{apos} in layer {apos}{1}{apos}"),self.rs.snapped_ref_fid, self.ds.refLyr.name())
-                    try_it = False
-
-                if try_it:
-                    data_feature = qgis.core.QgsFeature()
-                    data_feature.setFields(self.ds.dataLyr.dataProvider().fields())
-
-                    if self.rs.edit_pk is not None:
-                        # clone data from current selected self.rs.edit_pk
-                        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, self.rs.edit_pk)
-                        for field in data_feature.fields():
-                            data_feature[field.name()] = data_feature[field.name()]
-
-                    data_feature[self.ds.dataLyrReferenceField.name()] = ref_layer_join_value
-
-                    # if self.ds.refLyr.crs().isGeographic():
-                    #     measure = round(self.rs.current_measure, 6)
-                    # else:
-                    #     measure = round(self.rs.current_measure, 2)
-
-                    # caveat: measure never larger then reference-line-length
-                    measure = max(0, min(ref_feature.geometry().length(), self.rs.current_measure))
-
-                    data_feature[self.ds.dataLyrMeasureField.name()] = measure
-
-                    integer_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong]
-
-                    if self.ds.dataLyrIdField.type() in integer_field_types:
-                        # pre-fetch sequence-value for openFeatureForm for convenience
-                        # normally integer-pk-Field declared as "INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL"
-                        current_pks = qgis.core.QgsVectorLayerUtils.getValues(self.ds.dataLyr, self.ds.dataLyrIdField.name(), selectedOnly=False)[0]
-                        if current_pks:
-                            new_pk = max(current_pks) + 1
-                        else:
-                            new_pk = 1
-                        data_feature[self.ds.dataLyrIdField.name()] = new_pk
-                        # no convenience for string-PKs, but fortunately the FeatureForm checks the uniqueness
-                    try:
-                        self.ds.dataLyr.startEditing()
-                        self.ds.dataLyr.addFeature(data_feature)
-                        # dialog is modal by default
-                        dlg_result = self.iface.openFeatureForm(self.ds.dataLyr, data_feature)
-                        if dlg_result:
-                            insert_ref_pk = data_feature[self.ds.dataLyrReferenceField.name()]
-                            insert_measure = data_feature[self.ds.dataLyrMeasureField.name()]
-                            ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, insert_ref_pk)
-                            # user could have changed feature-data in dialog (PK, Reference-id, measure)
-                            # ➜ validity-check like "Reference-id exists in refLyr?" "measure 0 ...referenced_line_length?"
-                            if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-
-                                if ref_feature.geometry().constGet().partCount() > 1:
-                                    warning_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Geometry {apos}{0}{apos} in Reference-Layer {apos}{1}{apos} is {2}-parted, Point-on-Line-Feature not calculable"),insert_ref_pk, self.ds.refLyr.name(), ref_feature.geometry().constGet().partCount())
-
-                                if insert_measure < 0 or insert_measure > ref_feature.geometry().length():
-                                    info_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "measure {0} truncated to range 0 ... {1}"),insert_measure, ref_feature.geometry().length())
-                                    data_feature[self.ds.dataLyrMeasureField.name()] = max(0, min(ref_feature.geometry().length(), insert_measure))
-                                    self.ds.dataLyr.updateFeature(data_feature)
-
-                                commit_result = self.ds.dataLyr.commitChanges()
-                                if commit_result:
-                                    used_pk = data_feature[self.ds.dataLyrIdField.name()]
-
-                                    did_it = True
-                                    success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "New feature with ID {apos}{0}{apos} successfully added to {apos}{1}{apos}..."),used_pk, self.ds.dataLyr.name())
-                                else:
-                                    self.ds.dataLyr.rollBack()
-                                    critical_msg = str(self.ds.dataLyr.commitErrors())
-                            else:
-                                self.ds.dataLyr.rollBack()
-                                critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "No Reference-Layer-feature with PK {apos}{0}{apos}..."),insert_ref_pk)
-                        else:
-                            self.ds.dataLyr.rollBack()
-                            success_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
-
-                    except Exception as err:
-                        self.ds.dataLyr.rollBack()
-                        critical_msg = str(err)
-
-        else:
-            critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Add feature failed, missing privileges in Data-Layer {apos}{0}{apos}..."),self.ds.dataLyr.name())
-
-        if did_it:
-            if self.cf.show_layer_complete:
-                self.ds.showLyr.updateExtents()
-                if self.iface.mapCanvas().isCachingEnabled():
-                    self.ds.showLyr.triggerRepaint()
-                else:
-                    self.iface.mapCanvas().refresh()
-
-            self.set_edit_pk(used_pk, False)
-
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
-
-    def s_delete_feature(self):
-        """deletes the current selected Data-feature """
-        # Rev. 2023-04-27
-        try_delete = True
-        did_it = True
-        critical_msg = ''
-        success_msg = ''
-        info_msg = ''
-        warning_msg = ''
-
-        if self.rs.edit_pk is not None:
-            if self.cf.delete_enabled:
-                if self.check_data_feature(self.rs.edit_pk):
-                    if self.ds.dataLyr.isEditable():
-                        if self.ds.dataLyr.isModified():
-                            dialog_result = QtWidgets.QMessageBox.question(
-                                None,
-                                f"LinearReferencing Update Feature ({gdp()})",
-                                qt_format(QtCore.QCoreApplication.translate('PolEvt', "{div_pre_1}Layer {apos}{0}{apos} is editable!{div_ml_1}[Yes]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session with save{br}[No]{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{nbsp}{arrow} End edit session without save{br}[Cancel]{nbsp}{arrow} Quit...{div_ml_2}{div_pre_2}"),self.ds.dataLyr.name()),
-                                buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
-                                defaultButton=QtWidgets.QMessageBox.Yes
-                            )
-
-                            if dialog_result == QtWidgets.QMessageBox.Yes:
-                                self.ds.dataLyr.commitChanges()
-                            elif dialog_result == QtWidgets.QMessageBox.No:
-                                self.ds.dataLyr.rollBack()
-                            else:
-                                try_delete &= False
-                                did_it = False
-                                info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
-                        else:
-                            self.ds.dataLyr.rollBack()
-
-                    if try_delete:
-                        self.ds.dataLyr.startEditing()
-                        dialog_result = QtWidgets.QMessageBox.question(
-                            None,
-                            f"LinearReferencing ({gdp()})",
-                            qt_format(QtCore.QCoreApplication.translate('PolEvt', "Delete feature with ID {apos}{0}{apos} from Data-Layer {apos}{1}{apos}?"),self.rs.edit_pk, self.ds.dataLyr.name()),
-                            buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                            defaultButton=QtWidgets.QMessageBox.Yes
-                        )
-
-                        if dialog_result == QtWidgets.QMessageBox.Yes:
-                            try:
-                                self.ds.dataLyr.deleteFeatures([self.rs.edit_pk])
-                                commit_result = self.ds.dataLyr.commitChanges()
-                                if commit_result:
-                                    did_it = True
-                                    success_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature with ID {apos}{0}{apos} successfully deleted in Data-Layer {apos}{1}{apos}..."),self.rs.edit_pk, self.ds.dataLyr.name())
-                                else:
-                                    self.ds.dataLyr.rollBack()
-                                    did_it = False
-                                    critical_msg = str(self.ds.dataLyr.commitErrors())
-
-                            except Exception as err:
-                                self.ds.dataLyr.rollBack()
-                                did_it = False
-                                critical_msg = f"Exception '{err.__class__.__name__}' in {gdp()}: {err}"
-                        else:
-                            self.ds.dataLyr.rollBack()
-                            did_it = False
-                            info_msg = QtCore.QCoreApplication.translate('PolEvt', "Canceled by user...")
+                    self.dlg_append_log_message('WARNING', error_msg)
             else:
-                did_it = False
-                critical_msg = qt_format(QtCore.QCoreApplication.translate('PolEvt', "Delete feature failed, missing privileges in layer {apos}{0}{apos}..."),self.ds.dataLyr.name())
+                # should not happen, because the insert-button would be disabled
+                self.dlg_append_log_message('INFO', MY_DICT.tr('no_edit_feature'))
         else:
-            did_it = False
-            warning_msg = QtCore.QCoreApplication.translate('PolEvt', "Delete feature failed, no feature selected...")
+            # should not happen, because the insert-button would be disabled
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('data_layer_not_editable'))
 
-        if did_it:
-            if self.cf.show_layer_complete:
-                if self.iface.mapCanvas().isCachingEnabled():
-                    self.ds.showLyr.triggerRepaint()
+    def s_insert_stationing(self):
+        """
+            opens feature-form for new feature with reference and stationing(s)
+            layer must be editable
+            insert to edit-buffer is done by OK-click on feature-form
+            """
+        # Rev. 2024-08-06
+        # Check: Privileges sufficient and Layer in Edit-Mode
+
+        if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_INSERT_ENABLED) in self.system_vs:
+            if self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid:
+                ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=self.session_data.measure_feature.ref_fid)
+                if ref_feature:
+                    if ref_feature.hasGeometry():
+
+                        if self.stored_settings.lrMode == 'Mabs':
+                            geom_m_valid, error_msg = tools.MyTools.check_geom_m_valid(ref_feature.geometry())
+                            if not geom_m_valid:
+                                self.dlg_append_log_message('WARNING', MY_DICT.tr('note_reference_geom_not_m_valid', self.session_data.measure_feature.ref_fid, error_msg))
+                        else:
+                            if ref_feature.geometry().constGet().partCount() > 1:
+                                self.dlg_append_log_message('WARNING', MY_DICT.tr('note_reference_geom_multi_parted', self.session_data.measure_feature.ref_fid))
+
+                        stationing = 0
+                        if self.stored_settings.lrMode == 'Nabs':
+                            stationing = self.session_data.measure_feature.snap_n_abs
+                        elif self.stored_settings.lrMode == 'Nfract':
+                            stationing = self.session_data.measure_feature.snap_n_fract
+                        elif self.stored_settings.lrMode == 'Mabs':
+                            stationing = self.session_data.measure_feature.snap_m_abs
+                        else:
+                            raise NotImplementedError(f"lr_mode '{self.stored_settings.lrMode}' not implemented")
+
+                        if self.stored_settings.storagePrecision >= 0:
+                            stationing = round(stationing, self.stored_settings.storagePrecision)
+
+                        data_feature = qgis.core.QgsVectorLayerUtils.createFeature(self.derived_settings.dataLyr)
+
+                        data_feature[self.derived_settings.dataLyrReferenceField.name()] = ref_feature[self.derived_settings.refLyrIdField.name()]
+                        data_feature[self.derived_settings.dataLyrStationingField.name()] = stationing
+
+                        feature_form = tools.MyTools.get_feature_form(self.iface, self.derived_settings.dataLyr, data_feature, True)
+                        feature_form.show()
+                    else:
+                        self.dlg_append_log_message("WARNING", MY_DICT.tr('exc_reference_feature_wo_geom', ref_feature.id()))
                 else:
-                    self.iface.mapCanvas().refresh()
-            self.resume_measure()
+                    self.dlg_append_log_message("WARNING", error_msg)
+            else:
+                # should not happen, because the insert-button would be disabled
+                self.dlg_append_log_message('WARNING', MY_DICT.tr('no_measurement'))
+        else:
+            # should not happen, because the insert-button would be disabled
+            self.dlg_append_log_message('INFO', MY_DICT.tr('data_layer_not_editable'))
 
-        self.push_messages(success_msg, info_msg, warning_msg, critical_msg)
+    def st_delete_feature(self):
+        """delete feature
+            called from QTableWidget (Feature-Selection)
+            data_fid stored as property in cell-widget
+            """
+        # Rev. 2024-08-06
+        data_fid = self.sender().property('data_fid')
 
-    def restore_settings(self):
-        """restores self.ss from Project"""
-        # Rev. 2023-04-27
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+        self.tool_select_feature(data_fid, ['sn', 'rfl'], ['sn'], extent_mode)
 
-        self.ss = self.StoredSettings()
+        if (self.SVS.DATA_LAYER_EXISTS | self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_DELETE_ENABLED) in self.system_vs:
+            data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+
+            if data_feature:
+                dialog_result = QtWidgets.QMessageBox.question(
+                    None,
+                    f"LinearReferencing ({get_debug_pos()})",
+                    MY_DICT.tr('delete_feature', data_fid),
+                    buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    defaultButton=QtWidgets.QMessageBox.Yes
+                )
+
+                if dialog_result == QtWidgets.QMessageBox.Yes:
+                    try:
+                        # still inside edit-buffer, no commit
+                        self.derived_settings.dataLyr.beginEditCommand("st_delete_feature")
+                        self.derived_settings.dataLyr.deleteFeature(data_fid)
+                        self.derived_settings.dataLyr.endEditCommand()
+                    except Exception as err:
+                        self.dlg_append_log_message('WARNING', f"Exception '{err.__class__.__name__}' in {get_debug_pos()}: {err}")
+            else:
+                self.dlg_append_log_message('INFO', error_msg)
+
+        else:
+            self.dlg_append_log_message('INFO', MY_DICT.tr('no_delete_allowed'))
+
+    def st_qtrv_feature_selection_selection_changed(self, selected_items: QtCore.QItemSelection, deselected_items: QtCore.QItemSelection):
+        """
+        triggered on selectionChange in self.my_dialog.qtrv_feature_selection.selectionModel, f.e. by click on row-header and click inside the table-row
+        https://doc.qt.io/qt-5/qitemselectionmodel.html
+        https://doc.qt.io/qt-5/qitemselection.html => list of selection ranges
+        https://doc.qt.io/qt-5/qitemselectionrange.html
+        :param selected_items: list of selection ranges which is selected now
+        :param deselected_items: list of selection ranges which was selected before and now is deselected (f.e. by [ctrl]-click)
+        """
+        # Rev. 2024-08-06
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+
+        if not selected_items:
+            # unselect
+            self.session_data.edit_feature = None
+            self.dlg_refresh_measure_section()
+            self.cvs_hide_markers()
+
+        self.my_dialog.qtrv_feature_selection.selectionModel()
+
+        for sel_range in selected_items:
+            # QItemSelectionRange
+            for index in sel_range.indexes():
+                if index.parent().isValid():
+                    # index has parent => data-feature
+                    index_0 = index.siblingAtColumn(0)
+                    data_fid = index_0.data(self.data_fid_role)
+                    self.tool_select_feature(data_fid, ['sn', 'rfl'], ['sn'], extent_mode)
+                    # break after first selection-range and first item
+                    return
+                else:
+                    # no parent => reference-feature
+                    self.session_data.edit_feature = None
+                    self.dlg_refresh_measure_section()
+                    self.cvs_hide_markers()
+                    # break after first selection-range and first item
+                    return
+
+    def st_qtrv_feature_selection_double_click(self, index: QtCore.QModelIndex):
+        """emitted on double-click on any cell in qtrv_feature_selection-treeview
+        because of tree-structure this can be a double-click on a
+        level-0-item => reference-feature or
+        level-1-item => data-feature
+        selects and zooms feature"""
+        # Rev. 2024-08-06
+        if index.parent().isValid():
+            # index has parent => data-feature
+            index_0 = index.siblingAtColumn(0)
+            data_fid = index_0.data(self.data_fid_role)
+            self.tool_select_feature(data_fid, ['sn', 'rfl'], ['sn'], 'zoom')
+        else:
+            # no parent => reference-feature, no further action, but the treeview will automatically expand/collapse on double-click
+            pass
+
+    def st_qtrv_post_processing_double_click(self, index: QtCore.QModelIndex):
+        """emitted on double-click on any cell in qtrv_po_pro_selection-treeview
+        => zoom to po-pro-points and hide other po_pro-graphics
+        because of tree-structure this can be a double-click on a
+        level-0-item => reference-feature or
+        level-1-item => data-feature"""
+        # Rev. 2024-08-06
+        if index.parent().isValid():
+            # index has parent => data-feature
+            self.cvs_hide_markers()
+            index_0 = index.siblingAtColumn(0)
+            data_fid = index_0.data(self.data_fid_role)
+            self.tool_select_po_pro_feature(data_fid, ['sn', 'rfl', 'cn'], ['sn', 'cn'], 'zoom')
+        else:
+            # no parent => reference-feature, no further action, but the treeview will automatically expand/collapse on double-click
+            pass
+
+    def st_qtrv_po_pro_selection_selection_changed(self, selected_items: QtCore.QItemSelection, deselected_items: QtCore.QItemSelection):
+        """
+        triggered on selectionChange in self.my_dialog.qtrv_po_pro_selection.selectionModel, f.e. by click on row-header and click inside the table-row
+        https://doc.qt.io/qt-5/qitemselectionmodel.html
+        https://doc.qt.io/qt-5/qitemselection.html => list of selection ranges
+        https://doc.qt.io/qt-5/qitemselectionrange.html
+        :param selected_items: list of selection ranges which is selected now
+        :param deselected_items: list of selection ranges which was selected before and now is deselected (f.e. by [ctrl]-click)
+        """
+        # Rev. 2024-08-06
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+
+        for sel_range in selected_items:
+            # QItemSelectionRange
+            for index in sel_range.indexes():
+                if index.parent().isValid():
+                    # index has parent => data-feature
+                    self.cvs_hide_markers()
+                    index_0 = index.siblingAtColumn(0)
+                    data_fid = index_0.data(self.data_fid_role)
+                    self.tool_select_po_pro_feature(data_fid, ['sn', 'rfl', 'cn'], ['sn', 'cn'], extent_mode)
+                    return
+                else:
+                    # no parent => reference-feature, no further action, but the treeview will automatically expand/collapse on double-click
+                    pass
+
+    def cvs_toggle_feature_markers(self):
+        """shows/hides/zooms/pans feature on canvas"""
+        # Rev. 2024-08-06
+        data_fid = self.sender().property('data_fid')
+
+        draw_markers = ['sn', 'rfl']
+        extent_markers = ['sn']
+
+        # is any feature with the same data_fid currently selected?
+        already_selected = self.session_data.edit_feature is not None and self.session_data.edit_feature.data_fid == data_fid
+
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+
+        if not already_selected or extent_mode:
+            self.tool_select_feature(data_fid, draw_markers, extent_markers, extent_mode)
+        else:
+            # toggle
+            if self.cvs_check_marker_visibility(draw_markers):
+                self.cvs_hide_markers()
+            else:
+                self.cvs_draw_feature(self.session_data.edit_feature, draw_markers, extent_markers, extent_mode)
+
+    def cvs_toggle_po_pro_markers(self):
+        """shows/hides/zooms/pans PostProcessing-feature on canvas"""
+        # Rev. 2024-08-06
+        data_fid = self.sender().property('data_fid')
+
+        draw_markers = ['sn', 'cn', 'rfl']
+        extent_markers = ['sn', 'cn']
+
+        # is any feature with the same data_fid currently selected?
+        already_selected = self.session_data.po_pro_feature is not None and self.session_data.po_pro_feature.data_fid == data_fid
+
+        extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+
+        if not already_selected or extent_mode:
+            self.tool_select_po_pro_feature(data_fid, draw_markers, extent_markers, extent_mode)
+        else:
+            # toggle
+            if self.cvs_check_marker_visibility(draw_markers):
+                self.cvs_hide_markers()
+            else:
+                self.cvs_draw_po_pro_feature(self.session_data.edit_feature, draw_markers, extent_markers, extent_mode)
+
+    def sys_restore_settings(self):
+        """restores self.stored_settings from qgis.core.QgsProject.instance(), called from __init__"""
+        # Rev. 2024-08-06
+
+        self.stored_settings = StoredSettings()
         # read stored settings from project:
         # filter: startswith('_')
-        # ➜ read and set "hidden" properties, not their property-setter/getter/deleter
-        property_list = [prop for prop in dir(self.StoredSettings) if prop.startswith('_') and not prop.startswith('__')]
+        # -> read and set "hidden" properties, not their property-setter/getter/deleter
+        property_list = [prop for prop in dir(StoredSettings) if prop.startswith('_') and not prop.startswith('__')]
 
         for prop_name in property_list:
             key = f"/PolEvt/{prop_name}"
             restored_value, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', key)
             if restored_value and type_conversion_ok:
-                setattr(self.ss, prop_name, restored_value)
+                setattr(self.stored_settings, prop_name, restored_value)
 
-        # pre-check some settings, final check via check_settings
-        reference_layer_defined = (
-                self.ss._refLyrId is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._refLyrId) is not None
-        )
+    def sys_set_tool_mode(self, tool_mode: str) -> bool:
+        """sets self.session_data.tool_mode with simple checks
+        :returns: True if the tool_mode could be set, False if something went wrong and the tool_mode could not be set"""
+        # Rev. 2024-08-06
+        # switch-back-by-canvas-click-convenience
+        self.session_data.previous_tool_mode = self.session_data.tool_mode
+        self.iface.mapCanvas().setCursor(QtCore.Qt.ArrowCursor)
 
-        reference_layer_complete = (
-                reference_layer_defined and
-                self.ss._refLyrIdFieldName is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._refLyrId).fields().indexOf(self.ss._refLyrIdFieldName) >= 0
-        )
+        # MapTool has possibly changed, f. e. Pan
+        self.iface.mapCanvas().setMapTool(self)
 
-        data_layer_complete = (
-                self.ss._dataLyrId is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._dataLyrId) is not None and
-                self.ss._dataLyrIdFieldName is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._dataLyrId).fields().indexOf(self.ss._dataLyrIdFieldName) >= 0 and
-                self.ss._dataLyrReferenceFieldName is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._dataLyrId).fields().indexOf(self.ss._dataLyrReferenceFieldName) >= 0 and
-                self.ss._dataLyrMeasureFieldName is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._dataLyrId).fields().indexOf(self.ss._dataLyrMeasureFieldName) >= 0
-        )
+        # Snapping to reference-layer could have been disabled
+        self.cvs_set_snap_config()
 
-        show_layer_complete = (
-                self.ss._showLyrId is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._showLyrId) is not None and
-                self.ss._showLyrBackReferenceFieldName is not None and
-                qgis.core.QgsProject.instance().mapLayer(self.ss._showLyrId).fields().indexOf(self.ss._showLyrBackReferenceFieldName) >= 0
-        )
+        if tool_mode not in self.tool_modes:
+            self.dlg_append_log_message('WARNING', MY_DICT.tr('tool_mode_not_implemented', tool_mode))
+            return False
 
-        # all or nothing
-        # access via setter of the properties to set the project "dirty"
-        if not reference_layer_complete:
-            self.ss._refLyrId = None
-            self.ss._refLyrIdFieldName = None
+        if tool_mode in ['reposition_feature']:
+            if not (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None:
+                return False
+        if tool_mode in ['move_feature']:
+            # additional check self.session_data.edit_feature.is_valid
+            if not (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.edit_feature is not None and self.session_data.edit_feature.is_valid:
+                return False
+        elif tool_mode in ['select_features']:
+            if not self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+                return False
+        elif tool_mode in ['measure_stationing']:
+            if not self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+                return False
+        elif tool_mode in ['move_stationing']:
+            if not (self.SVS.REFERENCE_LAYER_USABLE in self.system_vs and self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid):
+                return False
+        elif tool_mode in ['move_po_pro_feature']:
+            # additional check self.session_data.po_pro_feature.is_valid
+            if not (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_UPDATE_ENABLED | self.SVS.DATA_LAYER_EDITABLE) in self.system_vs and self.session_data.po_pro_feature is not None and self.session_data.po_pro_feature.is_valid:
+                return False
 
-        if not reference_layer_complete or not data_layer_complete:
-            self.ss._dataLyrId = None
-            self.ss._dataLyrIdFieldName = None
-            self.ss._dataLyrReferenceFieldName = None
-            self.ss._dataLyrMeasureFieldName = None
-
-        if not reference_layer_complete or not data_layer_complete or not show_layer_complete:
-            self.ss._showLyrId = None
-            self.ss._showLyrBackReferenceFieldName = None
-
-    def check_settings(self, tool_mode: str = None):
-        """ restores self.ds from self.ss, checks the current configuration
-        :param tool_mode: checks the settings for this tool-mode and set self.rs.tool_mode, if settings are sufficient. If None, self.rs.tool_mode is used
-        """
-        # Rev. 2023-05-03
-
-        if tool_mode and tool_mode not in self.tool_modes:
-            self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "tool_mode {apos}{0}{apos} not implemented..."),tool_mode))
-            tool_mode = None
-
-        if not tool_mode:
-            # use current toolmode
-            tool_mode = self.rs.tool_mode
-
-        if not tool_mode:
-            # no current toolmode ➜ first run
-            tool_mode = 'measuring'
-
-        # each time re-init with blank "templates"
-        self.ds = self.DeferedSettings()
-        self.cf = self.CheckFlags()
-
-        if self.iface.mapCanvas().mapSettings().destinationCrs().isGeographic():
-            self.rs.num_digits = 4
+        if tool_mode in ['initialized', 'pausing']:
+            self.iface.mapCanvas().setCursor(QtCore.Qt.ArrowCursor)
+        elif tool_mode in ['select_features']:
+            self.iface.mapCanvas().setCursor(qgis.core.QgsApplication.getThemeCursor(qgis.core.QgsApplication.Cursor.Select))
         else:
-            self.rs.num_digits = 1
+            # self.iface.mapCanvas().setCursor(QtCore.Qt.CrossCursor)
+            # bit smaller than CrossCursor but with hole in the center
+            self.iface.mapCanvas().setCursor(qgis.core.QgsApplication.getThemeCursor(qgis.core.QgsApplication.Cursor.CrossHair))
+
+        self.session_data.tool_mode = tool_mode
+        self.dlg_show_tool_mode()
+        return True
+
+    def sys_check_settings(self):
+        """ checks the current configuration, performs multiple tasks:
+                - checks self.stored_settings and re-creates self.derived_settings (checks and re-connects all registered layers)
+                - checks self.derived_settings and re-creates self.system_vs
+            """
+        # Rev. 2024-08-06
+
+        self.system_vs = self.SVS.INIT
+        self.derived_settings = DerivedSettings()
 
         # for type-matching-checks of reference/join-Fields:
         # PKs in databases ar normaly type int, but there are four types of integers, which can be mixed
         # all other possible types (propably string...) must match exact
-        integer_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong]
-        pk_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong, QtCore.QVariant.String]
-        numeric_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong, QtCore.QVariant.Double]
+        integer_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong]
+        pk_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong, QtCore.QMetaType.QString]
+        numeric_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong, QtCore.QMetaType.Double]
 
-        # get the resources == loaded layers in current project
-        data_layers = tools.MyToolFunctions.get_data_layers()
-        linestring_layers = tools.MyToolFunctions.get_linestring_layers()
-        point_layers = tools.MyToolFunctions.get_point_layers()
+        self.sys_connect_reference_layer(self.stored_settings.refLyrId)
 
-        # convenience for the basic requisite:
-        # if not set so far: take the topmost linestring-layer
-        if not self.ss.refLyrId or self.ss.refLyrId not in linestring_layers:
-            if linestring_layers:
-                new_ref_lyer = list(linestring_layers.values()).pop()
-                self.connect_reference_layer(new_ref_lyer)
+        if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+            if self.stored_settings.refLyrIdFieldName:
+                fnx = self.derived_settings.refLyr.dataProvider().fields().indexOf(self.stored_settings.refLyrIdFieldName)
+                if fnx >= 0 and self.derived_settings.refLyr.dataProvider().fields()[fnx].type() in pk_field_types:
+                    self.derived_settings.refLyrIdField = self.derived_settings.refLyr.dataProvider().fields()[fnx]
+                    self.system_vs |= self.SVS.REFERENCE_LAYER_ID_FIELD_DEFINED
 
-        if self.ss.refLyrId and self.ss.refLyrId in linestring_layers:
-            self.ds.refLyr = linestring_layers[self.ss.refLyrId]
+                    self.sys_connect_data_layer(self.stored_settings.dataLyrId)
 
-        if self.ds.refLyr and self.ss.refLyrIdFieldName:
-            fnx = self.ds.refLyr.dataProvider().fields().indexOf(self.ss.refLyrIdFieldName)
-            if fnx >= 0 and self.ds.refLyr.dataProvider().fields()[fnx].type() in pk_field_types:
-                self.ds.refLyrPkField = self.ds.refLyr.dataProvider().fields()[fnx]
+                    if self.SVS.DATA_LAYER_CONNECTED in self.system_vs:
 
-        if self.ss.dataLyrId and self.ss.dataLyrId in data_layers:
-            self.ds.dataLyr = data_layers[self.ss.dataLyrId]
+                        if self.stored_settings.dataLyrIdFieldName:
+                            fnx = self.derived_settings.dataLyr.dataProvider().fields().indexOf(self.stored_settings.dataLyrIdFieldName)
+                            if fnx >= 0 and self.derived_settings.dataLyr.dataProvider().fields()[fnx].type() in pk_field_types:
+                                self.derived_settings.dataLyrIdField = self.derived_settings.dataLyr.dataProvider().fields()[fnx]
+                                self.system_vs |= self.SVS.DATA_LAYER_ID_FIELD_DEFINED
 
-        if self.ds.dataLyr and self.ss.dataLyrIdFieldName:
-            fnx = self.ds.dataLyr.dataProvider().fields().indexOf(self.ss.dataLyrIdFieldName)
-            if fnx >= 0 and self.ds.dataLyr.dataProvider().fields()[fnx].type() in numeric_field_types:
-                self.ds.dataLyrIdField = self.ds.dataLyr.dataProvider().fields()[fnx]
+                                if self.derived_settings.refLyr and self.derived_settings.refLyrIdField and self.stored_settings.dataLyrReferenceFieldName:
+                                    fnx = self.derived_settings.dataLyr.dataProvider().fields().indexOf(self.stored_settings.dataLyrReferenceFieldName)
+                                    if fnx >= 0 and (self.derived_settings.refLyrIdField.type() == self.derived_settings.dataLyr.dataProvider().fields()[fnx].type()) or (self.derived_settings.refLyrIdField.type() in integer_field_types and self.derived_settings.dataLyr.dataProvider().fields()[fnx].type() in integer_field_types):
+                                        self.derived_settings.dataLyrReferenceField = self.derived_settings.dataLyr.dataProvider().fields()[fnx]
+                                        self.system_vs |= self.SVS.DATA_LAYER_REFERENCE_FIELD_DEFINED
 
-        if self.ds.dataLyr and self.ds.refLyr and self.ds.refLyrPkField and self.ss.dataLyrReferenceFieldName:
-            fnx = self.ds.dataLyr.dataProvider().fields().indexOf(self.ss.dataLyrReferenceFieldName)
-            if fnx >= 0 and (self.ds.refLyrPkField.type() == self.ds.dataLyr.dataProvider().fields()[fnx].type()) or (self.ds.refLyrPkField.type() in integer_field_types and self.ds.dataLyr.dataProvider().fields()[fnx].type() in integer_field_types):
-                self.ds.dataLyrReferenceField = self.ds.dataLyr.dataProvider().fields()[fnx]
+                                        if self.stored_settings.dataLyrStationingFieldName:
+                                            fnx = self.derived_settings.dataLyr.dataProvider().fields().indexOf(self.stored_settings.dataLyrStationingFieldName)
+                                            if fnx >= 0 and self.derived_settings.dataLyr.dataProvider().fields()[fnx].type() in numeric_field_types:
+                                                self.derived_settings.dataLyrStationingField = self.derived_settings.dataLyr.dataProvider().fields()[fnx]
+                                                self.system_vs |= self.SVS.DATA_LAYER_STATIONING_FIELD_DEFINED
 
-        if self.ds.dataLyr and self.ss.dataLyrMeasureFieldName:
-            fnx = self.ds.dataLyr.dataProvider().fields().indexOf(self.ss.dataLyrMeasureFieldName)
-            if fnx >= 0 and self.ds.dataLyr.dataProvider().fields()[fnx].type() in numeric_field_types:
-                self.ds.dataLyrMeasureField = self.ds.dataLyr.dataProvider().fields()[fnx]
+                                                self.sys_connect_show_layer(self.stored_settings.showLyrId)
+                                                if self.SVS.SHOW_LAYER_CONNECTED in self.system_vs:
 
-        if self.ss.showLyrId and self.ss.showLyrId in point_layers and self.ss.showLyrId != self.ss.refLyrId:
-            self.ds.showLyr = point_layers[self.ss.showLyrId]
+                                                    if self.derived_settings.dataLyrIdField and self.stored_settings.showLyrBackReferenceFieldName:
+                                                        fnx = self.derived_settings.showLyr.dataProvider().fields().indexOf(self.stored_settings.showLyrBackReferenceFieldName)
+                                                        if fnx >= 0 and (self.derived_settings.dataLyrIdField.type() == self.derived_settings.showLyr.dataProvider().fields()[fnx].type()) or (self.derived_settings.dataLyrIdField.type() in integer_field_types and self.derived_settings.showLyr.dataProvider().fields()[fnx].type() in integer_field_types):
+                                                            self.derived_settings.showLyrBackReferenceField = self.derived_settings.showLyr.dataProvider().fields()[fnx]
+                                                            self.system_vs |= self.SVS.SHOW_LAYER_BACK_REFERENCE_FIELD_DEFINED
 
-        if self.ds.showLyr and self.ds.dataLyrIdField and self.ss.showLyrBackReferenceFieldName:
-            fnx = self.ds.showLyr.dataProvider().fields().indexOf(self.ss.showLyrBackReferenceFieldName)
-            if fnx >= 0 and (self.ds.dataLyrIdField.type() == self.ds.showLyr.dataProvider().fields()[fnx].type()) or (self.ds.dataLyrIdField.type() in integer_field_types and self.ds.showLyr.dataProvider().fields()[fnx].type() in integer_field_types):
-                self.ds.showLyrBackReferenceField = self.ds.showLyr.dataProvider().fields()[fnx]
+        self.gui_add_layer_actions()
 
-        self.cf.reference_layer_defined = self.ds.refLyr is not None
+    def dlg_show_tool_mode(self):
+        """show self.session_data.tool_mode in dialog"""
+        # Rev. 2024-08-06
+        if self.my_dialog:
+            # check/uncheck icons showing current tool_mode:
+            self.my_dialog.pbtn_select_features.setChecked(self.session_data.tool_mode == 'select_features')
+            self.my_dialog.pb_move_stationing.setChecked(self.session_data.tool_mode == 'move_stationing')
 
-        self.cf.reference_layer_complete = (
-                self.cf.reference_layer_defined and
-                self.ds.refLyrPkField is not None
-        )
-        self.cf.data_layer_defined = self.ds.dataLyr is not None
-        self.cf.data_layer_complete = (
-                self.cf.data_layer_defined and
-                self.ds.dataLyrIdField is not None and
-                self.ds.dataLyrReferenceField is not None and
-                self.ds.dataLyrMeasureField is not None
-        )
-        self.cf.show_layer_defined = self.ds.showLyr is not None
-        self.cf.show_layer_complete = (
-                self.cf.show_layer_defined and
-                self.ds.showLyrBackReferenceField is not None
-        )
+            self.my_dialog.pbtn_resume_stationing.setChecked(self.session_data.tool_mode == 'measure_stationing')
 
-        if self.rs.snapped_ref_fid is not None:
-            if self.cf.reference_layer_defined:
-                ref_feature = self.ds.refLyr.getFeature(self.rs.snapped_ref_fid)
-                if not (ref_feature and ref_feature.isValid() and ref_feature.hasGeometry()):
-                    self.rs.snapped_ref_fid = None
-            else:
-                self.rs.snapped_ref_fid = None
+            if self.session_data.tool_mode:
+                tool_mode_description = MY_DICT.tr('pol_toolmode_' + self.session_data.tool_mode)
 
-        checked_edit_pk = None
-        if self.cf.reference_layer_complete and self.cf.data_layer_complete:
-            # double-check: data_feature and ref_feature
-            if self.rs.edit_pk is not None:
+                tool_tip = MY_DICT.tr('tool_mode_tool_tip', self.session_data.tool_mode, tool_mode_description)
 
-                data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, self.rs.edit_pk)
-                if data_feature and data_feature.isValid():
-                    ref_id = data_feature[self.ss.dataLyrReferenceFieldName]
-                    ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, ref_id)
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                        checked_edit_pk = self.rs.edit_pk
+                self.my_dialog.pbtn_tool_mode_indicator.setToolTip(tool_tip)
 
-        self.rs.edit_pk = checked_edit_pk
+                # status_message = f"Tool-Mode '{self.session_data.tool_mode}' -> {tool_mode_description}"
+                # self.dlg_show_status_message('INFO',status_message)
 
-        # make unique
-        self.rs.selected_pks = list(dict.fromkeys(self.rs.selected_pks))
+                tool_mode_icon = QtGui.QIcon(':icons/mActionOptions.svg')
 
-        checked_selected_pks = []
-        if self.cf.reference_layer_complete and self.cf.data_layer_complete and len(self.rs.selected_pks) > 0:
-            not_valid_count = 0
-            no_ref_layer_count = 0
-            # check self.rs.selected_pks: iterate through List of PKs and query features
-            for pk in self.rs.selected_pks:
-                data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, pk)
-                if data_feature and data_feature.isValid():
-                    ref_id = data_feature[self.ss.dataLyrReferenceFieldName]
-                    ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, ref_id)
-                    if ref_feature and ref_feature.isValid() and ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                        checked_selected_pks.append(pk)
-                    else:
-                        no_ref_layer_count += 1
-                else:
-                    not_valid_count += 1
+                # show same icon in status-bar as in dialog
+                if self.session_data.tool_mode == 'initialized':
+                    tool_mode_icon = QtGui.QIcon(':icons/mIconSuccess.svg')
+                elif self.session_data.tool_mode == 'pausing':
+                    # previous_tool_mode = self.session_data.previous_tool_mode
+                    tool_mode_icon = QtGui.QIcon(':icons/pause-circle-outline.svg')
+                elif self.session_data.tool_mode == 'measure_stationing':
+                    tool_mode_icon = QtGui.QIcon(':icons/linear_referencing_point.svg')
+                elif self.session_data.tool_mode == 'move_stationing':
+                    tool_mode_icon = QtGui.QIcon(':icons/move_pol_feature.svg')
+                elif self.session_data.tool_mode == 'move_feature':
+                    tool_mode_icon = QtGui.QIcon(':icons/move_pol_feature.svg')
+                elif self.session_data.tool_mode == 'reposition_feature':
+                    tool_mode_icon = QtGui.QIcon(':icons/reposition_pol_feature.svg')
+                elif self.session_data.tool_mode == 'select_features':
+                    tool_mode_icon = QtGui.QIcon(':icons/select_point_features.svg')
+                elif self.session_data.tool_mode == 'move_po_pro_feature':
+                    tool_mode_icon = QtGui.QIcon(':icons/move_pol_feature.svg')
 
-            if not_valid_count:
-                self.push_messages(info_msg=f"{not_valid_count} feature(s) removed from selection, features not valid")
+                self.my_dialog.pbtn_tool_mode_indicator.setIcon(tool_mode_icon)
 
-            if no_ref_layer_count:
-                self.push_messages(info_msg=f"{no_ref_layer_count} feature(s) removed from selection, no referenced linestring feature found")
+    def dlg_show_status_message(self, message_type: str, message_content: str):
+        """displays message in self.my_dialog.status_bar
+        style status_bar (color, background-color) dependend on message_type
+        starts self.my_dialog.status_bar_timer, which will reset style and clear status_bar after xxx Milliseconds dependend on message_type
+        :param message_type: INFO/SUCCESS/WARNING/CRITICAL, according to dlg_append_log_message
+        :param message_content:
+        """
+        # Rev. 2024-08-06
+        if self.my_dialog:
+            self.my_dialog.status_bar.clearMessage()
 
-        self.rs.selected_pks = checked_selected_pks
+            duration_ms = 2500
+            css = "QStatusBar {background-color: silver; color: black; font-weight: normal;}"
+            if message_type == 'INFO':
+                duration_ms = 2500
+                css = "QStatusBar {background-color: silver; color: black; font-weight: normal;}"
+                # self.iface.messageBar().pushMessage('LinearReferencing', message_content, level=qgis.core.Qgis.Info)
 
+            elif message_type == 'SUCCESS':
+                duration_ms = 2500
+                css = "QStatusBar {background-color: silver; color: green; font-weight: normal;}"
+                # self.iface.messageBar().pushMessage('LinearReferencing', message_content, level=qgis.core.Qgis.Success)
+            elif message_type == 'WARNING':
+                duration_ms = 5000
+                css = "QStatusBar {background-color: silver; color: red; font-weight: normal;}"
+                # self.iface.messageBar().pushMessage('LinearReferencing', message_content, level=qgis.core.Qgis.Warning, duration=10)
+            elif message_type == 'CRITICAL':
+                duration_ms = 5000
+                css = "QStatusBar {background-color: orange; color: red; font-weight: bolr;}"
+                # self.iface.messageBar().pushMessage('LinearReferencing', message_content, level=qgis.core.Qgis.Critical, duration=20)
 
-
-
-        # check tool_mode and switch if required
-        if tool_mode in ['init', 'disabled']:
-            if self.cf.reference_layer_defined:
-                tool_mode = 'measuring'
-            else:
-                tool_mode = 'disabled'
-        elif tool_mode in ['measuring', 'after_measure', 'before_move_point', 'move_point']:
-            if not self.cf.reference_layer_defined:
-                tool_mode = 'disabled'
-        elif tool_mode in ['select_features']:
-            if not self.cf.reference_layer_defined and not self.cf.data_layer_complete and not self.cf.show_layer_complete:
-                if self.cf.reference_layer_defined:
-                    tool_mode = 'measuring'
-                else:
-                    tool_mode = 'disabled'
-
-        self.cf.measure_completed = (
-                self.cf.reference_layer_defined and
-                self.rs.snapped_ref_fid is not None and
-                self.rs.current_measure is not None
-        )
-
-        self.cf.insert_enabled = (
-                self.cf.measure_completed and
-                self.cf.reference_layer_complete and
-                self.cf.data_layer_complete and
-                (self.ds.dataLyr.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.AddFeatures)
-        )
-
-        self.cf.update_enabled = (
-                self.cf.data_layer_complete and
-                (self.ds.dataLyr.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.ChangeAttributeValues)
-        )
-
-        self.cf.delete_enabled = (
-                self.cf.data_layer_complete and
-                (self.ds.dataLyr.dataProvider().capabilities() & qgis.core.QgsVectorDataProvider.DeleteFeatures)
-        )
-
-        # see https://doc.qt.io/qt-5/qt.html#CursorShape-enum
-        if type(self.iface.mapCanvas().mapTool()) == PolEvt:
-            if tool_mode in ['measuring', 'after_measure', 'select_features']:
-                self.iface.mapCanvas().setCursor(QtCore.Qt.CrossCursor)
-            elif tool_mode in ['before_move_point']:
-                self.iface.mapCanvas().setCursor(QtCore.Qt.OpenHandCursor)
-            elif tool_mode in ['move_point']:
-                self.iface.mapCanvas().setCursor(QtCore.Qt.ClosedHandCursor)
-            else:
-                self.iface.mapCanvas().setCursor(QtCore.Qt.ArrowCursor)
-
-        self.rs.tool_mode = tool_mode
-        # show Toolmode in status_bar
-        if self.my_dialogue:
-            self.my_dialogue.status_bar.clearMessage()
-            self.my_dialogue.status_bar.showMessage(f"{self.rs.tool_mode} ➜ {self.tool_modes.get(self.rs.tool_mode)}")
+            self.my_dialog.status_bar.showMessage(message_content, duration_ms)
+            self.my_dialog.status_bar.setStyleSheet(css)
+            # QtCore.QTimer, timeout connected to my_dialog.reset_status_bar, which will reset style and clear contents
+            self.my_dialog.status_bar_timer.start(duration_ms)
 
     def dlg_refresh_style_settings_section(self):
-        if self.my_dialogue:
+        """refresh the style-section: symbol-types, colors, line-width, line-style"""
+        # Rev. 2024-08-06
+        if self.my_dialog:
             block_widgets = [
-                self.my_dialogue.qcb_pt_measure_icon_type,
-                self.my_dialogue.qspb_pt_measure_icon_size,
-                self.my_dialogue.qspb_pt_measure_pen_width,
-                self.my_dialogue.qpb_pt_measure_color,
-                self.my_dialogue.qpb_pt_measure_fill_color,
+                self.my_dialog.qcb_pt_sn_icon_type,
+                self.my_dialog.qspb_pt_sn_icon_size,
+                self.my_dialog.qspb_pt_sn_pen_width,
+                self.my_dialog.qpb_pt_sn_color,
+                self.my_dialog.qpb_pt_sn_fill_color,
 
-                self.my_dialogue.qcb_pt_edit_icon_type,
-                self.my_dialogue.qspb_pt_edit_icon_size,
-                self.my_dialogue.qspb_pt_edit_pen_width,
-                self.my_dialogue.qpb_pt_edit_color,
-                self.my_dialogue.qpb_pt_edit_fill_color,
+                self.my_dialog.qcb_ref_line_style,
+                self.my_dialog.qspb_ref_line_width,
+                self.my_dialog.qpb_ref_line_color,
 
-                self.my_dialogue.qcb_ref_line_line_style,
-                self.my_dialogue.qspb_ref_line_width,
-                self.my_dialogue.qpb_ref_line_color,
             ]
 
             for widget in block_widgets:
                 widget.blockSignals(True)
 
-            tools.MyToolFunctions.select_by_value(self.my_dialogue.qcb_pt_measure_icon_type, self.ss.pt_measure_icon_type, 0, 256)
-            tools.MyToolFunctions.select_by_value(self.my_dialogue.qcb_pt_edit_icon_type, self.ss.pt_edit_icon_type, 0, 256)
-            tools.MyToolFunctions.select_by_value(self.my_dialogue.qcb_ref_line_line_style, self.ss.ref_line_line_style, 0, 256)
-            self.my_dialogue.qpb_pt_measure_color.set_color(self.ss.pt_measure_color)
-            self.my_dialogue.qpb_pt_measure_fill_color.set_color(self.ss.pt_measure_fill_color)
-            self.my_dialogue.qpb_pt_edit_color.set_color(self.ss.pt_edit_color)
-            self.my_dialogue.qpb_pt_edit_fill_color.set_color(self.ss.pt_edit_fill_color)
-            self.my_dialogue.qpb_ref_line_color.set_color(self.ss.ref_line_color)
-            self.my_dialogue.qspb_pt_edit_icon_size.setValue(self.ss.pt_edit_icon_size)
-            self.my_dialogue.qspb_pt_edit_pen_width.setValue(self.ss.pt_edit_pen_width)
-            self.my_dialogue.qspb_pt_measure_icon_size.setValue(self.ss.pt_measure_icon_size)
-            self.my_dialogue.qspb_pt_measure_pen_width.setValue(self.ss.pt_measure_pen_width)
-            self.my_dialogue.qspb_ref_line_width.setValue(self.ss.ref_line_width)
+            tools.MyTools.select_by_value(self.my_dialog.qcb_pt_sn_icon_type, self.stored_settings.pt_sn_icon_type, 0, self.setting_key_role)
+            self.my_dialog.qspb_pt_sn_icon_size.setValue(self.stored_settings.pt_sn_icon_size)
+            self.my_dialog.qspb_pt_sn_pen_width.setValue(self.stored_settings.pt_sn_pen_width)
+            self.my_dialog.qpb_pt_sn_color.set_color(self.stored_settings.pt_sn_color)
+            self.my_dialog.qpb_pt_sn_fill_color.set_color(self.stored_settings.pt_sn_fill_color)
+
+            tools.MyTools.select_by_value(self.my_dialog.qcb_ref_line_style, self.stored_settings.ref_line_style, 0, self.setting_key_role)
+            self.my_dialog.qpb_ref_line_color.set_color(self.stored_settings.ref_line_color)
+            self.my_dialog.qspb_ref_line_width.setValue(self.stored_settings.ref_line_width)
 
             for widget in block_widgets:
                 widget.blockSignals(False)
 
     def dlg_refresh_layer_settings_section(self):
         """refreshes the settings-part in dialog"""
-        # Rev. 2023-05-10
-        if self.my_dialogue:
+        # Rev. 2024-08-06
+
+        linestring_wkb_types = [
+            qgis.core.QgsWkbTypes.LineString25D,
+            qgis.core.QgsWkbTypes.MultiLineString25D,
+            qgis.core.QgsWkbTypes.LineString,
+            qgis.core.QgsWkbTypes.MultiLineString,
+            qgis.core.QgsWkbTypes.LineStringZ,
+            qgis.core.QgsWkbTypes.MultiLineStringZ,
+            qgis.core.QgsWkbTypes.LineStringM,
+            qgis.core.QgsWkbTypes.MultiLineStringM,
+            qgis.core.QgsWkbTypes.LineStringZM,
+            qgis.core.QgsWkbTypes.MultiLineStringZM,
+        ]
+
+        single_point_wkb_types = [
+            qgis.core.QgsWkbTypes.Point25D,
+            qgis.core.QgsWkbTypes.Point,
+            qgis.core.QgsWkbTypes.PointZ,
+            qgis.core.QgsWkbTypes.PointM,
+            qgis.core.QgsWkbTypes.PointZM,
+        ]
+
+        if self.my_dialog:
 
             block_widgets = [
-                self.my_dialogue.qcbn_reference_layer,
-                self.my_dialogue.qcbn_reference_layer_id_field,
-                self.my_dialogue.qcbn_data_layer,
-                self.my_dialogue.qcbn_data_layer_id_field,
-                self.my_dialogue.qcbn_data_layer_reference_field,
-                self.my_dialogue.qcbn_data_layer_measure_field,
-                self.my_dialogue.qcbn_show_layer,
-                self.my_dialogue.qcbn_show_layer_back_reference_field
+                self.my_dialog.qcbn_reference_layer,
+                self.my_dialog.qcbn_ref_lyr_id_field,
+                self.my_dialog.qcbn_data_layer,
+                self.my_dialog.qcbn_data_layer_id_field,
+                self.my_dialog.qcbn_data_layer_reference_field,
+                self.my_dialog.qcbn_data_layer_stationing_field,
+                self.my_dialog.qcb_lr_mode,
+                self.my_dialog.qcb_storage_precision,
+                self.my_dialog.qcbn_show_layer,
+                self.my_dialog.qcbn_show_layer_back_reference_field,
+
             ]
 
             for widget in block_widgets:
                 widget.blockSignals(True)
-                widget.clear()
+                if hasattr(widget, 'clear') and callable(getattr(widget, 'clear')):
+                    widget.clear()
+                widget.setEnabled(False)
 
-            linestring_layers = tools.MyToolFunctions.get_linestring_layers()
-            pk_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong, QtCore.QVariant.String]
-            integer_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong]
-            numeric_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong, QtCore.QVariant.Double]
+            pk_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong, QtCore.QMetaType.QString]
+            integer_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong]
+            numeric_field_types = [QtCore.QMetaType.Int, QtCore.QMetaType.UInt, QtCore.QMetaType.LongLong, QtCore.QMetaType.ULongLong, QtCore.QMetaType.Double]
 
             # refresh Settings Layers and Fields...
             model = QtGui.QStandardItemModel(0, 3)
-            for cltrl in qgis.core.QgsProject.instance().layerTreeRoot().findLayers():
-                if cltrl.layer():
-                    cl = cltrl.layer()
+
+            for cl in qgis.core.QgsProject.instance().mapLayers().values():
+                if cl.isValid():
                     name_item = QtGui.QStandardItem(cl.name())
-                    name_item.setData(cl, 256)
-                    name_item.setEnabled(cl.id() in linestring_layers)
+                    name_item.setData(cl, self.setting_key_role)
+                    name_item.setEnabled(isinstance(cl, qgis.core.QgsVectorLayer) and cl.dataProvider().name() != 'virtual' and cl.dataProvider().wkbType() in linestring_wkb_types)
                     if isinstance(cl, qgis.core.QgsVectorLayer):
                         geometry_item = QtGui.QStandardItem(qgis.core.QgsWkbTypes.displayString(cl.dataProvider().wkbType()))
                     else:
@@ -3284,39 +5936,42 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                     items = [name_item, geometry_item, provider_item]
                     model.appendRow(items)
 
-            self.my_dialogue.qcbn_reference_layer.set_model(model)
-            if self.ds.refLyr:
-                self.my_dialogue.qcbn_reference_layer.select_by_value(0, 256, self.ds.refLyr)
+            self.my_dialog.qcbn_reference_layer.set_model(model)
+            self.my_dialog.qcbn_reference_layer.setEnabled(True)
+
+            if self.derived_settings.refLyr:
+                self.my_dialog.qcbn_reference_layer.select_by_value(0, self.setting_key_role, self.derived_settings.refLyr)
                 # Reference-Layer is selected, now select the Id-Field
                 model = QtGui.QStandardItemModel(0, 3)
                 idx = 0
-                for field in self.ds.refLyr.dataProvider().fields():
+                for field in self.derived_settings.refLyr.dataProvider().fields():
                     name_item = QtGui.QStandardItem(field.name())
-                    name_item.setData(field, 256)
+                    name_item.setData(field, self.setting_key_role)
                     name_item.setEnabled(field.type() in pk_field_types)
                     # mark PK-Field with green check-icon
                     is_pk_item = QtGui.QStandardItem()
-                    if idx in self.ds.refLyr.dataProvider().pkAttributeIndexes():
-                        is_pk_item.setData(QtGui.QIcon(':icons/Green_check_icon_with_gradient.svg'), 1)  # DecorationRole
+                    # is_pk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    if idx in self.derived_settings.refLyr.dataProvider().pkAttributeIndexes():
+                        # I love UTF...
+                        is_pk_item.setText('✔')
                     type_item = QtGui.QStandardItem(field.friendlyTypeString())
                     items = [name_item, type_item, is_pk_item]
                     model.appendRow(items)
                     idx += 1
 
-                self.my_dialogue.qcbn_reference_layer_id_field.set_model(model)
+                self.my_dialog.qcbn_ref_lyr_id_field.set_model(model)
+                self.my_dialog.qcbn_ref_lyr_id_field.setEnabled(True)
 
-                if self.ds.refLyrPkField:
+                if self.derived_settings.refLyrIdField:
                     # QtCore.Qt.ExactMatch doesn't match anything if used for fields, therefore match with role-index 0 (DisplayRole, Text-Content) with the (hopefully unique...) name of the field
-                    self.my_dialogue.qcbn_reference_layer_id_field.select_by_value(0, 0, self.ds.refLyrPkField.name())
+                    self.my_dialog.qcbn_ref_lyr_id_field.select_by_value(0, 0, self.derived_settings.refLyrIdField.name())
                     # PK-Field is selected, now the Data-Layer
                     model = QtGui.QStandardItemModel(0, 3)
 
-                    # in ihrer TOC-Reihenfolge
-                    for cltrl in qgis.core.QgsProject.instance().layerTreeRoot().findLayers():
-                        if cltrl.layer():
-                            cl = cltrl.layer()
+                    for cl in qgis.core.QgsProject.instance().mapLayers().values():
+                        if cl.isValid():
                             name_item = QtGui.QStandardItem(cl.name())
-                            name_item.setData(cl, 256)
+                            name_item.setData(cl, self.setting_key_role)
                             name_item.setEnabled(cl.type() == qgis.core.QgsMapLayerType.VectorLayer and cl.geometryType() == qgis.core.QgsWkbTypes.NullGeometry)
                             if isinstance(cl, qgis.core.QgsVectorLayer):
                                 geometry_item = QtGui.QStandardItem(qgis.core.QgsWkbTypes.displayString(cl.dataProvider().wkbType()))
@@ -3331,115 +5986,134 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                             items = [name_item, geometry_item, provider_item]
                             model.appendRow(items)
 
-                    self.my_dialogue.qcbn_data_layer.set_model(model)
+                    self.my_dialog.qcbn_data_layer.set_model(model)
+                    self.my_dialog.qcbn_data_layer.setEnabled(True)
 
-                    if self.ds.dataLyr:
-                        self.my_dialogue.qcbn_data_layer.select_by_value(0, 256, self.ds.dataLyr)
+                    if self.derived_settings.dataLyr:
+                        self.my_dialog.qcbn_data_layer.select_by_value(0, self.setting_key_role, self.derived_settings.dataLyr)
+
                         # dataLyr set, now the ID-Field
 
                         idx = 0
                         model = QtGui.QStandardItemModel(0, 3)
 
-                        for field in self.ds.dataLyr.dataProvider().fields():
+                        for field in self.derived_settings.dataLyr.dataProvider().fields():
                             name_item = QtGui.QStandardItem(field.name())
-                            name_item.setData(field, 256)
+                            name_item.setData(field, self.setting_key_role)
                             name_item.setEnabled(field.type() in pk_field_types)
                             # mark PK-Field with green check-icon
                             is_pk_item = QtGui.QStandardItem()
-                            if idx in self.ds.refLyr.dataProvider().pkAttributeIndexes():
-                                is_pk_item.setData(QtGui.QIcon(':icons/Green_check_icon_with_gradient.svg'), 1)  # DecorationRole
+                            # is_pk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+                            if idx in self.derived_settings.dataLyr.dataProvider().pkAttributeIndexes():
+                                is_pk_item.setText('✔')
                             type_item = QtGui.QStandardItem(field.friendlyTypeString())
                             items = [name_item, type_item, is_pk_item]
                             model.appendRow(items)
                             idx += 1
 
-                        self.my_dialogue.qcbn_data_layer_id_field.set_model(model)
+                        self.my_dialog.qcbn_data_layer_id_field.set_model(model)
+                        self.my_dialog.qcbn_data_layer_id_field.setEnabled(True)
 
-                        if self.ds.dataLyrIdField:
-                            self.my_dialogue.qcbn_data_layer_id_field.select_by_value(0, 0, self.ds.dataLyrIdField.name())
+                        if self.derived_settings.dataLyrIdField:
+                            self.my_dialog.qcbn_data_layer_id_field.select_by_value(0, 0, self.derived_settings.dataLyrIdField.name())
                             # PkField set, now the Reference-Field
                             idx = 0
                             model = QtGui.QStandardItemModel(0, 3)
-                            for field in self.ds.dataLyr.dataProvider().fields():
+                            for field in self.derived_settings.dataLyr.dataProvider().fields():
                                 name_item = QtGui.QStandardItem(field.name())
-                                name_item.setData(field, 256)
-                                # must be same type as type refLyrPkField, not ID-Field and not the selected PK-Field
-                                name_item.setEnabled(field != self.ds.dataLyrIdField and
-                                                     idx not in self.ds.dataLyr.dataProvider().pkAttributeIndexes() and
+                                name_item.setData(field, self.setting_key_role)
+                                # must be same type as type refLyrIdField, not ID-Field and not the selected PK-Field
+                                name_item.setEnabled(field != self.derived_settings.dataLyrIdField and
+                                                     idx not in self.derived_settings.dataLyr.dataProvider().pkAttributeIndexes() and
                                                      (
-                                                             (self.ds.refLyrPkField.type() in integer_field_types and field.type() in integer_field_types) or
-                                                             field.type() == self.ds.refLyrPkField.type()
+                                                             (self.derived_settings.refLyrIdField.type() in integer_field_types and field.type() in integer_field_types) or
+                                                             field.type() == self.derived_settings.refLyrIdField.type()
                                                      )
                                                      )
                                 # mark PK-Field with green check-icon
                                 is_pk_item = QtGui.QStandardItem()
-                                if idx in self.ds.refLyr.dataProvider().pkAttributeIndexes():
-                                    is_pk_item.setData(QtGui.QIcon(':icons/Green_check_icon_with_gradient.svg'), 1)  # DecorationRole
+                                # is_pk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+                                if idx in self.derived_settings.dataLyr.dataProvider().pkAttributeIndexes():
+                                    is_pk_item.setText('✔')
                                 type_item = QtGui.QStandardItem(field.friendlyTypeString())
                                 items = [name_item, type_item, is_pk_item]
                                 model.appendRow(items)
                                 idx += 1
 
-                            self.my_dialogue.qcbn_data_layer_reference_field.set_model(model)
+                            self.my_dialog.qcbn_data_layer_reference_field.set_model(model)
+                            self.my_dialog.qcbn_data_layer_reference_field.setEnabled(True)
 
-                            if self.ds.dataLyrReferenceField:
-                                self.my_dialogue.qcbn_data_layer_reference_field.select_by_value(0, 0, self.ds.dataLyrReferenceField.name())
+                            if self.derived_settings.dataLyrReferenceField:
+                                self.my_dialog.qcbn_data_layer_reference_field.select_by_value(0, 0, self.derived_settings.dataLyrReferenceField.name())
 
                                 idx = 0
                                 model = QtGui.QStandardItemModel(0, 3)
-                                for field in self.ds.dataLyr.dataProvider().fields():
+                                for field in self.derived_settings.dataLyr.dataProvider().fields():
                                     name_item = QtGui.QStandardItem(field.name())
-                                    name_item.setData(field, 256)
+                                    name_item.setData(field, self.setting_key_role)
                                     # numerical, but no PK and not one of the almost selected fields. Can a double-value be used as PK or Reference-key...?
                                     name_item.setEnabled(
                                         field.type() in numeric_field_types and
-                                        field != self.ds.dataLyrIdField and
-                                        field != self.ds.dataLyrReferenceField and
-                                        idx not in self.ds.dataLyr.dataProvider().pkAttributeIndexes()
+                                        field != self.derived_settings.dataLyrIdField and
+                                        field != self.derived_settings.dataLyrReferenceField and
+                                        idx not in self.derived_settings.dataLyr.dataProvider().pkAttributeIndexes()
                                     )
                                     # mark PK-Field with green check-icon
                                     is_pk_item = QtGui.QStandardItem()
-                                    if idx in self.ds.refLyr.dataProvider().pkAttributeIndexes():
-                                        is_pk_item.setData(QtGui.QIcon(':icons/Green_check_icon_with_gradient.svg'), 1)  # DecorationRole
+                                    # is_pk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+                                    if idx in self.derived_settings.dataLyr.dataProvider().pkAttributeIndexes():
+                                        is_pk_item.setText('✔')
                                     type_item = QtGui.QStandardItem(field.friendlyTypeString())
                                     items = [name_item, type_item, is_pk_item]
                                     model.appendRow(items)
                                     idx += 1
 
-                                self.my_dialogue.qcbn_data_layer_measure_field.set_model(model)
+                                self.my_dialog.qcbn_data_layer_stationing_field.set_model(model)
+                                self.my_dialog.qcbn_data_layer_stationing_field.setEnabled(True)
 
-                                if self.ds.dataLyrMeasureField:
-                                    self.my_dialogue.qcbn_data_layer_measure_field.select_by_value(0, 0, self.ds.dataLyrMeasureField.name())
+                                if self.derived_settings.dataLyrStationingField:
+                                    self.my_dialog.qcbn_data_layer_stationing_field.select_by_value(0, 0, self.derived_settings.dataLyrStationingField.name())
 
                                     model = QtGui.QStandardItemModel(0, 3)
-                                    for cltrl in qgis.core.QgsProject.instance().layerTreeRoot().findLayers():
-                                        if cltrl.layer():
-                                            cl = cltrl.layer()
+                                    for cl in qgis.core.QgsProject.instance().mapLayers().values():
+                                        if cl.isValid():
                                             name_item = QtGui.QStandardItem(cl.name())
-                                            name_item.setData(cl, 256)
-                                            # Type vector, Point
-                                            # not (!) ogr
-                                            # ➜ must be database-view or virtual
-                                            # not found pyqgis-solution to detect database-layers
-                                            dep_lst = []
-                                            if cl.dataProvider().name() == 'virtual':
-                                                for dp in cl.dataProvider().dependencies():
-                                                    dep_lst.append(dp.layerId())
+                                            name_item.setData(cl, self.setting_key_role)
+                                            name_item.setEnabled(False)
+                                            if isinstance(cl, qgis.core.QgsVectorLayer) and cl.dataProvider().wkbType() in single_point_wkb_types:
+                                                if cl.dataProvider().name() == 'virtual':
+                                                    # only enable fitting virtual layers...
+                                                    virtual_check_contents = [
+                                                        self.derived_settings.refLyr.id(),
+                                                        self.derived_settings.refLyrIdField.name(),
+                                                        self.derived_settings.dataLyr.id(),
+                                                        self.derived_settings.dataLyrIdField.name(),
+                                                        self.derived_settings.dataLyrReferenceField.name(),
+                                                        self.derived_settings.dataLyrStationingField.name()
+                                                    ]
 
-                                            name_item.setEnabled(
-                                                cl.type() == qgis.core.QgsMapLayerType.VectorLayer and
-                                                cl.geometryType() == qgis.core.QgsWkbTypes.PointGeometry and
-                                                (
-                                                    # database ...
-                                                        cl.dataProvider().name() not in ['ogr', 'virtual'] or
-                                                        (
-                                                            # ... or virtual and defined with the registered refLyr.id() and dataLyr.id() int its uri
-                                                            cl.dataProvider().name() == 'virtual' and
-                                                            self.ds.refLyr.id() in dep_lst and
-                                                            self.ds.dataLyr.id() in dep_lst
-                                                        )
-                                                )
-                                            )
+                                                    if self.stored_settings.lrMode in ['Nabs', 'Nfract']:
+                                                        virtual_check_contents.append('ST_Line_Interpolate_Point')
+                                                        if all(s in cl.dataProvider().uri().uri() for s in virtual_check_contents):
+                                                            name_item.setEnabled(True)
+                                                            name_item.setToolTip(MY_DICT.tr('virtual_layer_fit_ttp'))
+                                                        else:
+                                                            name_item.setToolTip(MY_DICT.tr('virtual_layer_no_fit_ttp'))
+                                                    elif self.stored_settings.lrMode == 'Mabs':
+                                                        virtual_check_contents.append('ST_TrajectoryInterpolatePoint')
+                                                        if all(s in cl.dataProvider().uri().uri() for s in virtual_check_contents):
+                                                            name_item.setEnabled(True)
+                                                            name_item.setToolTip(MY_DICT.tr('virtual_layer_fit_ttp'))
+                                                        else:
+                                                            name_item.setToolTip(MY_DICT.tr('virtual_layer_no_fit_ttp'))
+
+                                                else:
+                                                    # ... or any layer type vector, point, non-virtual, because the user
+                                                    # might export the slow virtual-layer to file-based layer
+                                                    # or use a database-driven view
+                                                    # name_item.setEnabled(True)
+                                                    pass
+
                                             if isinstance(cl, qgis.core.QgsVectorLayer):
                                                 geometry_item = QtGui.QStandardItem(qgis.core.QgsWkbTypes.displayString(cl.dataProvider().wkbType()))
                                             else:
@@ -3453,531 +6127,713 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
                                             items = [name_item, geometry_item, provider_item]
                                             model.appendRow(items)
 
-                                    self.my_dialogue.qcbn_show_layer.set_model(model)
+                                    self.my_dialog.qcbn_show_layer.set_model(model)
+                                    self.my_dialog.qcbn_show_layer.setEnabled(True)
 
-                                    if self.ds.showLyr:
-                                        self.my_dialogue.qcbn_show_layer.select_by_value(0, 256, self.ds.showLyr)
+                                    if self.derived_settings.showLyr:
+                                        self.my_dialog.qcbn_show_layer.select_by_value(0, self.setting_key_role, self.derived_settings.showLyr)
 
                                         model = QtGui.QStandardItemModel(0, 3)
                                         idx = 0
-                                        for field in self.ds.showLyr.dataProvider().fields():
+                                        for field in self.derived_settings.showLyr.dataProvider().fields():
                                             name_item = QtGui.QStandardItem(field.name())
-                                            name_item.setData(field, 256)
+                                            name_item.setData(field, self.setting_key_role)
                                             # numerical, but no PK and not one of the almost selected fields. Can a double-value be used as PK or Reference-key...?
                                             name_item.setEnabled(
-                                                (self.ds.dataLyrIdField.type() in integer_field_types and field.type() in integer_field_types) or
-                                                field.type() == self.ds.dataLyrIdField.type()
+                                                (self.derived_settings.dataLyrIdField.type() in integer_field_types and field.type() in integer_field_types) or
+                                                field.type() == self.derived_settings.dataLyrIdField.type()
                                             )
                                             # mark PK-Field with green check-icon
                                             is_pk_item = QtGui.QStandardItem()
-                                            if idx in self.ds.refLyr.dataProvider().pkAttributeIndexes():
-                                                is_pk_item.setData(QtGui.QIcon(':icons/Green_check_icon_with_gradient.svg'), 1)  # DecorationRole
+                                            # is_pk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+                                            if idx in self.derived_settings.showLyr.dataProvider().pkAttributeIndexes():
+                                                is_pk_item.setText('✔')
                                             type_item = QtGui.QStandardItem(field.friendlyTypeString())
                                             items = [name_item, type_item, is_pk_item]
                                             model.appendRow(items)
                                             idx += 1
 
-                                        self.my_dialogue.qcbn_show_layer_back_reference_field.set_model(model)
+                                        self.my_dialog.qcbn_show_layer_back_reference_field.set_model(model)
+                                        self.my_dialog.qcbn_show_layer_back_reference_field.setEnabled(True)
 
-                                        if self.ds.showLyrBackReferenceField:
-                                            self.my_dialogue.qcbn_show_layer_back_reference_field.select_by_value(0, 0, self.ds.showLyrBackReferenceField.name())
+                                        if self.derived_settings.showLyrBackReferenceField:
+                                            self.my_dialog.qcbn_show_layer_back_reference_field.select_by_value(0, 0, self.derived_settings.showLyrBackReferenceField.name())
+
+            if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+                lr_modes = {
+                    'Nabs': MY_DICT.tr('lr_mode_n_abs'),
+                    'Nfract': MY_DICT.tr('lr_mode_n_fract'),
+                }
+                if self.SVS.REFERENCE_LAYER_M_ENABLED in self.system_vs:
+                    lr_modes['Mabs'] = MY_DICT.tr('lr_mode_m_abs')
+
+                ic = 0
+                for key in lr_modes:
+                    self.my_dialog.qcb_lr_mode.addItem(lr_modes[key], key)
+                    if key == self.stored_settings.lrMode:
+                        self.my_dialog.qcb_lr_mode.setCurrentIndex(ic)
+                    ic += 1
+                self.my_dialog.qcb_lr_mode.setEnabled(True)
+
+            ic = 0
+            # -1 => no rounding
+            for prec in range(-1, 9, 1):
+                self.my_dialog.qcb_storage_precision.addItem(str(prec), prec)
+                if prec == self.stored_settings.storagePrecision:
+                    self.my_dialog.qcb_storage_precision.setCurrentIndex(ic)
+                ic += 1
+            self.my_dialog.qcb_storage_precision.setEnabled(True)
 
             for widget in block_widgets:
                 widget.blockSignals(False)
 
-            self.my_dialogue.pb_open_ref_tbl.setEnabled(self.cf.reference_layer_defined)
-            self.my_dialogue.pb_call_ref_disp_exp_dlg.setEnabled(self.cf.reference_layer_defined)
-            self.my_dialogue.pb_open_data_tbl.setEnabled(self.cf.data_layer_defined)
-            self.my_dialogue.pb_call_data_disp_exp_dlg.setEnabled(self.cf.data_layer_defined)
-            self.my_dialogue.pb_open_show_tbl.setEnabled(self.cf.show_layer_defined)
-            self.my_dialogue.pb_call_show_disp_exp_dlg.setEnabled(self.cf.show_layer_defined)
-            self.my_dialogue.pbtn_create_show_layer.setEnabled(self.cf.reference_layer_complete and self.cf.data_layer_complete)
-            self.my_dialogue.pbtn_create_data_layer.setEnabled(self.cf.reference_layer_complete)
+            self.my_dialog.pb_open_ref_tbl.setEnabled(self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs)
+            self.my_dialog.pb_call_ref_disp_exp_dlg.setEnabled(self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs)
+            self.my_dialog.pb_open_data_tbl.setEnabled((self.SVS.REFERENCE_LAYER_COMPLETE | self.SVS.DATA_LAYER_EXISTS) in self.system_vs)
+            self.my_dialog.pb_open_data_tbl_2.setEnabled((self.SVS.REFERENCE_LAYER_COMPLETE | self.SVS.DATA_LAYER_EXISTS) in self.system_vs)
+            self.my_dialog.pb_call_data_disp_exp_dlg.setEnabled((self.SVS.REFERENCE_LAYER_COMPLETE | self.SVS.DATA_LAYER_EXISTS) in self.system_vs)
+            self.my_dialog.pbtn_create_data_layer.setEnabled(self.SVS.REFERENCE_LAYER_COMPLETE in self.system_vs)
+
+            self.my_dialog.pb_open_show_tbl.setEnabled(self.SVS.ALL_LAYERS_COMPLETE in self.system_vs)
+            self.my_dialog.pb_open_show_tbl_2.setEnabled(self.SVS.ALL_LAYERS_COMPLETE in self.system_vs)
+            self.my_dialog.pb_edit_show_layer_display_expression.setEnabled(self.SVS.ALL_LAYERS_COMPLETE in self.system_vs)
+            self.my_dialog.pbtn_create_show_layer.setEnabled(self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs)
+
+    def dlg_clear_measurements(self):
+        """clear dialog-measure-from-widgets"""
+        # Rev. 2024-08-06
+        if self.my_dialog:
+
+            block_widgets = [
+                self.my_dialog.dnspbx_snap_x,
+                self.my_dialog.dnspbx_snap_y,
+                self.my_dialog.dspbx_n_abs,
+                self.my_dialog.dspbx_n_fract,
+                self.my_dialog.dspbx_m_abs,
+                self.my_dialog.dspbx_m_fract,
+                self.my_dialog.dnspbx_z
+            ]
+
+            for widget in block_widgets:
+                widget.blockSignals(True)
+                widget.clear()
+                widget.blockSignals(False)
+
+    def dlg_unselect_qcbn_reference_feature(self):
+        """clears qcbn_reference_feature"""
+        # Rev. 2024-08-06
+        if self.my_dialog:
+            with (QtCore.QSignalBlocker(self.my_dialog.qcbn_reference_feature)):
+                self.my_dialog.qcbn_reference_feature.setCurrentIndex(-1)
+
+    def dlg_select_qcbn_reference_feature(self, ref_fid):
+        """set and show/clear self.session_data.current_ref_fid in dialog
+        see similar s_select_current_ref_fid triggered by indexChange in qcbn_reference_feature"""
+        # Rev. 2024-08-06
+        self.session_data.current_ref_fid = ref_fid
+
+        if self.my_dialog:
+            with (QtCore.QSignalBlocker(self.my_dialog.qcbn_reference_feature)):
+                if ref_fid:
+                    self.my_dialog.qcbn_reference_feature.select_by_value(0, self.ref_fid_role, ref_fid)
+                else:
+                    self.my_dialog.qcbn_reference_feature.set_current_index(-1)
+
+            self.dlg_refresh_measure_section()
+
+    def dlg_clear_canvas_coords(self):
+        # Rev. 2024-08-06
+        if self.my_dialog:
+            self.my_dialog.dnspbx_canvas_x.clear()
+            self.my_dialog.dnspbx_canvas_y.clear()
+
+    def dlg_refresh_measurements(self, pol: POL = None):
+        """refreshes dialog-measure-widgets"""
+        # Rev. 2024-08-06
+        if self.my_dialog:
+            block_widgets = [
+                self.my_dialog.dnspbx_snap_x,
+                self.my_dialog.dnspbx_snap_y,
+                self.my_dialog.dspbx_n_abs,
+                self.my_dialog.dspbx_n_fract,
+                self.my_dialog.dspbx_m_abs,
+                self.my_dialog.dspbx_m_fract,
+                self.my_dialog.dnspbx_z,
+            ]
+
+            for widget in block_widgets:
+                widget.blockSignals(True)
+                widget.clear()
+
+            if pol and pol.is_valid:
+                if isinstance(pol.snap_x, numbers.Number):
+                    self.my_dialog.dnspbx_snap_x.setValue(pol.snap_x)
+                if isinstance(pol.snap_y, numbers.Number):
+                    self.my_dialog.dnspbx_snap_y.setValue(pol.snap_y)
+                if isinstance(pol.snap_n_abs, numbers.Number):
+                    self.my_dialog.dspbx_n_abs.setValue(pol.snap_n_abs)
+                if isinstance(pol.snap_n_fract, numbers.Number):
+                    # TypeError: unsupported operand type(s) for *: 'NoneType' and 'int'
+                    self.my_dialog.dspbx_n_fract.setValue(pol.snap_n_fract * 100)
+                if self.SVS.REFERENCE_LAYER_M_ENABLED in self.system_vs:
+                    if isinstance(pol.snap_m_abs, numbers.Number):
+                        self.my_dialog.dspbx_m_abs.setValue(pol.snap_m_abs)
+                    if isinstance(pol.snap_m_fract, numbers.Number):
+                        self.my_dialog.dspbx_m_fract.setValue(pol.snap_m_fract * 100)
+                if self.SVS.REFERENCE_LAYER_Z_ENABLED in self.system_vs:
+                    if isinstance(pol.snap_z_abs, numbers.Number):
+                        self.my_dialog.dnspbx_z.setValue(pol.snap_z_abs)
+
+                self.dlg_select_qcbn_reference_feature(pol.ref_fid)
+
+            for widget in block_widgets:
+                widget.blockSignals(False)
 
     def dlg_refresh_measure_section(self):
-        """refresh measure-part in dialog: Measure-Tab, Measure-Group-Box, without reference_layer_section"""
-        # Rev. 2023-05-03
-        if self.my_dialogue:
-            # filter-by-type-list for measure-field, this should be double, but could be integer
+        """refresh measurement-section in dialog:
+            apply canvas-projection
+            select option from qcbn_reference_feature
+            enable buttons
+            for populate of form-widgets see
+            self.dlg_refresh_measurements()
+            self.dlg_refresh_qcbn_reference_feature
+            """
+        # Rev. 2024-08-06
+        if self.my_dialog:
+            self.my_dialog.pbtn_insert_stationing.setEnabled(False)
 
-            # adapt dialogue to Projection:
-            # projected vs. geographic CRS
-            # ➜ size-range, num digits, increments of QDoubleSpinBox, units...
-            if self.iface.mapCanvas().mapSettings().destinationCrs().isGeographic():
-                canvas_measure_unit = '[°]'
+            self.my_dialog.qcbn_reference_feature.setEnabled(self.SVS.REFERENCE_LAYER_USABLE in self.system_vs)
+
+            self.my_dialog.dnspbx_snap_x.setEnabled(self.SVS.REFERENCE_LAYER_USABLE in self.system_vs)
+            self.my_dialog.dnspbx_snap_y.setEnabled(self.SVS.REFERENCE_LAYER_USABLE in self.system_vs)
+            self.my_dialog.dspbx_n_abs.setEnabled(self.SVS.REFERENCE_LAYER_USABLE in self.system_vs)
+            self.my_dialog.dspbx_n_fract.setEnabled(self.SVS.REFERENCE_LAYER_USABLE in self.system_vs)
+
+            # convenience: show/hide some dialog-areas dependend on reference-layer-geometry-type
+            if self.SVS.REFERENCE_LAYER_M_ENABLED in self.system_vs:
+                # only show the toggle-icon itself, the rest (measure-widgets) gets visible after click on that icon
+                toggle_widgets = [
+                    self.my_dialog.m_abs_grp_hline,
+                    self.my_dialog.m_abs_grp_wdg,
+                    self.my_dialog.m_fract_grp_hline,
+                    self.my_dialog.m_fract_grp_wdg,
+                ]
+                for wdg in toggle_widgets:
+                    wdg.setVisible(True)
             else:
-                canvas_measure_unit = '[m]'
+                toggle_widgets = [
+                    self.my_dialog.m_abs_grp_hline,
+                    self.my_dialog.m_abs_grp_wdg,
+                    self.my_dialog.dspbx_m_abs,
+                    self.my_dialog.qlbl_unit_m_abs,
+                    self.my_dialog.qlbl_m_abs_valid_hint,
 
-            if self.ds.refLyr and self.ds.refLyr.crs().isGeographic():
-                layer_measure_unit = '[°]'
-                layer_measure_prec = 6
-                layer_measure_step = 0.0001
-            else:
-                layer_measure_unit = '[m]'
-                layer_measure_prec = 2
-                layer_measure_step = 1
-
-            for unit_widget in self.my_dialogue.canvas_unit_widgets:
-                unit_widget.setText(canvas_measure_unit)
-
-            for unit_widget in self.my_dialogue.layer_unit_widgets:
-                unit_widget.setText(layer_measure_unit)
-
-            self.my_dialogue.dspbx_measure.default_step = layer_measure_step
-            self.my_dialogue.dspbx_measure.setDecimals(layer_measure_prec)
-
-            # disable/enable some functional widgets regarding the current status
-
-            self.my_dialogue.pbtn_resume_measure.setEnabled(self.cf.reference_layer_defined)
-
-            self.my_dialogue.dspbx_measure.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.dspbx_measure_fract.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.tbtn_move_up.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.tbtn_move_start.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.tbtn_move_down.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.tbtn_move_end.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.pbtn_move_point.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.pbtn_move_point.setChecked(self.cf.measure_completed and self.rs.tool_mode in ['before_move_point', 'move_point'])
-            self.my_dialogue.pb_pan_to_measure.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.le_snap_pt1_x.setEnabled(self.cf.measure_completed)
-            self.my_dialogue.le_snap_pt1_y.setEnabled(self.cf.measure_completed)
-
-            self.my_dialogue.qcbn_snapped_ref_fid.setEnabled(self.cf.reference_layer_defined)
-            self.my_dialogue.pb_open_ref_form.setEnabled(self.cf.reference_layer_defined)
-            self.my_dialogue.pb_zoom_to_ref_feature.setEnabled(self.cf.reference_layer_defined)
-
-            # set/clear form-widgets without trigger their signals
-            with QtCore.QSignalBlocker(self.my_dialogue.qcbn_snapped_ref_fid):
-                if self.cf.reference_layer_defined and self.rs.snapped_ref_fid is not None:
-                    self.my_dialogue.qcbn_snapped_ref_fid.select_by_value(0, 256, self.rs.snapped_ref_fid)
-                else:
-                    self.my_dialogue.qcbn_snapped_ref_fid.clear_selection()
-
-    def dlg_refresh_stored_settings_section(self):
-        """re-populates the list with the stored Configurations in the dialog"""
-        # Rev. 2023-05-08
-        if self.my_dialogue:
-            self.my_dialogue.lw_stored_settings.clear()
-            for setting_idx in range(self._num_storable_settings):
-                key = f"/PolEvtStoredSettings/setting_{setting_idx}/setting_label"
-                setting_label, type_conversion_ok = qgis.core.QgsProject.instance().readEntry('LinearReferencing', key)
-                if setting_label and type_conversion_ok:
-                    qlwi = QtWidgets.QListWidgetItem()
-                    qlwi.setText(setting_label)
-                    qlwi.setData(256, setting_label)
-                    self.my_dialogue.lw_stored_settings.addItem(qlwi)
-
-    def dlg_refresh_feature_selection_section(self):
-        """refreshes the Feature-Selection-List and buttons in dialog"""
-        # Rev. 2023-05-03
-        if self.my_dialogue:
-            # stored for the restore the sort-settings afterwards
-            prev_sort_col_idx = self.my_dialogue.qtw_selected_pks.horizontalHeader().sortIndicatorSection()
-            prev_sort_order = self.my_dialogue.qtw_selected_pks.horizontalHeader().sortIndicatorOrder()
-
-            # make unique
-            self.rs.selected_pks = list(dict.fromkeys(self.rs.selected_pks))
-
-            self.my_dialogue.qtw_selected_pks.setRowCount(0)
-            self.my_dialogue.qtw_selected_pks.setColumnCount(0)
-            self.my_dialogue.qtw_selected_pks.horizontalHeader().setVisible(False)
-
-            # QTableWidget with selected edit-PKs, Show-Layer not necessary, but taken into account
-            # signal/slot see:
-            # self.my_dialogue.qtw_selected_pks.itemPressed.connect(self.qtw_item_pressed)
-            if self.cf.reference_layer_complete and self.cf.data_layer_complete and len(self.rs.selected_pks) > 0:
-
-                edit_features = {}
-                # check self.rs.selected_pks: iterate through List of PKs and query features
-                for edit_pk in self.rs.selected_pks:
-                    if self.check_data_feature(edit_pk,False):
-                        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-                        ref_id = data_feature[self.ss.dataLyrReferenceFieldName]
-                        ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, ref_id)
-                        if self.cf.show_layer_complete:
-                            show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
-                            if show_feature and show_feature.isValid():
-                                edit_features[edit_pk] = [data_feature, ref_feature, show_feature]
-                            else:
-                                edit_features[edit_pk] = [data_feature, ref_feature, None]
-                        else:
-                            edit_features[edit_pk] = [data_feature, ref_feature, None]
-
-                self.rs.selected_pks = list(edit_features.keys())
-
-                self.my_dialogue.qtw_selected_pks.horizontalHeader().setVisible(True)
-                self.my_dialogue.qtw_selected_pks.setRowCount(len(self.rs.selected_pks))
-
-                # displayExpression() for single-field: "field_name"
-                # displayField() for same field: field_name (no quotes)
-                # complexer displayExpression()-sample: "fid" + "line_ref_id" (including all spaces, tabs, linebreaks...)
-                # displayField() for this expression: '' (empty string)
-                # Logic:
-                # Table with meaningful headers and contents,
-                #   1. use possibly defined displayExpressions in the two/three involved layers
-                #   2. PKs/IDs should always be recognizable, if they aren't already included in the displayExpression
-
-                header_labels = [
-                    'Data-Layer',
-                    'Reference-Layer + Measure'
+                    self.my_dialog.m_fract_grp_hline,
+                    self.my_dialog.m_fract_grp_wdg,
+                    self.my_dialog.dspbx_m_fract,
+                    self.my_dialog.qlbl_unit_m_fract,
+                    self.my_dialog.qlbl_m_fract_valid_hint,
                 ]
 
-                if self.cf.show_layer_complete:
-                    header_labels.append('Show-Layer')
+                for wdg in toggle_widgets:
+                    wdg.setVisible(False)
 
-                self.my_dialogue.qtw_selected_pks.setColumnCount(len(header_labels))
-                self.my_dialogue.qtw_selected_pks.setHorizontalHeaderLabels(header_labels)
+                self.my_dialog.pb_toggle_m_abs_grp.setIcon(QtGui.QIcon(':icons/plus-box-outline.svg'))
+                self.my_dialog.pb_toggle_m_fract_grp.setIcon(QtGui.QIcon(':icons/plus-box-outline.svg'))
 
-                remove_icon = QtGui.QIcon(':icons/mIconClearTextHover.svg')
-                highlight_icon = QtGui.QIcon(':icons/mIconSelected.svg')
-                pan_icon = QtGui.QIcon(':icons/mActionPanToSelected.svg')
-                identify_icon = QtGui.QIcon(':icons/mActionIdentify.svg')
+            if self.SVS.REFERENCE_LAYER_Z_ENABLED in self.system_vs:
+                toggle_widgets = [
+                    self.my_dialog.z_grp_hline,
+                    self.my_dialog.z_grp_wdg
+                ]
+                for wdg in toggle_widgets:
+                    wdg.setVisible(True)
+            else:
+                toggle_widgets = [
+                    self.my_dialog.z_grp_hline,
+                    self.my_dialog.z_grp_wdg,
+                    self.my_dialog.dnspbx_z,
+                    self.my_dialog.qlbl_z_unit,
+                ]
+                self.my_dialog.pb_toggle_z_grp.setIcon(QtGui.QIcon(':icons/plus-box-outline.svg'))
+                for wdg in toggle_widgets:
+                    wdg.setVisible(False)
 
-                data_context = qgis.core.QgsExpressionContext()
-                # Features from Reference-Layer will show eith their PK and the evaluated displayExpression
-                data_display_exp = qgis.core.QgsExpression(self.ds.dataLyr.displayExpression())
-                data_display_exp.prepare(data_context)
+            self.my_dialog.tbtn_move_start.setEnabled(False)
+            self.my_dialog.tbtn_move_down.setEnabled(False)
+            self.my_dialog.tbtn_move_up.setEnabled(False)
+            self.my_dialog.tbtn_move_end.setEnabled(False)
+            self.my_dialog.pb_zoom_to_stationings.setEnabled(False)
+            self.my_dialog.pb_move_stationing.setEnabled(False)
 
-                ref_context = qgis.core.QgsExpressionContext()
-                ref_display_exp = qgis.core.QgsExpression(self.ds.refLyr.displayExpression())
-                ref_display_exp.prepare(ref_context)
-                if self.cf.show_layer_complete:
-                    show_context = qgis.core.QgsExpressionContext()
-                    show_display_exp = qgis.core.QgsExpression(self.ds.showLyr.displayExpression())
-                    show_display_exp.prepare(show_context)
+            self.my_dialog.pbtn_resume_stationing.setEnabled(self.SVS.REFERENCE_LAYER_USABLE in self.system_vs)
 
-                rc = 0
-                integer_field_types = [QtCore.QVariant.Int, QtCore.QVariant.UInt, QtCore.QVariant.LongLong, QtCore.QVariant.ULongLong]
-                for edit_pk in edit_features:
-                    data_feature = edit_features[edit_pk][0]
-                    ref_feature = edit_features[edit_pk][1]
-                    show_feature = edit_features[edit_pk][2]
+            self.my_dialog.pbtn_insert_stationing.setEnabled((self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_INSERT_ENABLED) in self.system_vs and self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid)
 
-                    data_pk = data_feature[self.ds.dataLyrIdField.name()]
-                    data_context.setFeature(data_feature)
-                    data_evaled_exp = data_display_exp.evaluate(data_context)
-                    data_label = f"'{data_evaled_exp}'"
-                    # expression with dataLyrIdField as single field
-                    if data_display_exp.isField() and self.ds.dataLyrIdField.name() in data_display_exp.referencedColumns():
-                        if self.ds.dataLyrIdField.type() in integer_field_types:
-                            data_label = f"# {data_evaled_exp}"
+            # and self.session_data.edit_feature.is_valid
+
+            if (self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE | self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_UPDATE_ENABLED) in self.system_vs and self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid and self.session_data.edit_feature is not None:
+                self.my_dialog.pbtn_update_stationing.setEnabled(True)
+                self.my_dialog.pbtn_update_stationing.setText(MY_DICT.tr('update_selected_pbtxt', self.session_data.edit_feature.data_fid))
+            else:
+                self.my_dialog.pbtn_update_stationing.setEnabled(False)
+                self.my_dialog.pbtn_update_stationing.setText(MY_DICT.tr('update_blank_pbtxt'))
+
+            enable_pausing_widgets = self.SVS.REFERENCE_LAYER_USABLE in self.system_vs and self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid
+
+            self.my_dialog.tbtn_move_start.setEnabled(enable_pausing_widgets)
+            self.my_dialog.tbtn_move_down.setEnabled(enable_pausing_widgets)
+            self.my_dialog.tbtn_move_up.setEnabled(enable_pausing_widgets)
+            self.my_dialog.tbtn_move_end.setEnabled(enable_pausing_widgets)
+
+            self.my_dialog.pb_move_stationing.setEnabled(enable_pausing_widgets)
+
+            enable_stationing_widgets = self.SVS.REFERENCE_LAYER_USABLE in self.system_vs and self.session_data.current_ref_fid is not None
+            self.my_dialog.dspbx_n_abs.setEnabled(enable_stationing_widgets)
+            self.my_dialog.dspbx_n_fract.setEnabled(enable_stationing_widgets)
+
+            geom_m_valid = False
+            self.my_dialog.qlbl_m_abs_valid_hint.clear()
+            self.my_dialog.qlbl_m_fract_valid_hint.clear()
+            if (self.SVS.REFERENCE_LAYER_M_ENABLED in self.system_vs) and self.session_data.current_ref_fid is not None:
+                reference_geom, error_msg = self.tool_get_reference_geom(ref_fid=self.session_data.current_ref_fid)
+                if reference_geom:
+                    geom_m_valid, error_msg = tools.MyTools.check_geom_m_valid(reference_geom)
+                    if not geom_m_valid:
+                        self.my_dialog.qlbl_m_abs_valid_hint.setText(MY_DICT.tr('reference_geom_not_m_valid', self.session_data.current_ref_fid, error_msg))
+                        self.my_dialog.qlbl_m_fract_valid_hint.setText(MY_DICT.tr('reference_geom_not_m_valid', self.session_data.current_ref_fid, error_msg))
+
+            self.my_dialog.dspbx_m_abs.setEnabled(enable_stationing_widgets and geom_m_valid)
+            self.my_dialog.dspbx_m_fract.setEnabled(enable_stationing_widgets and geom_m_valid)
+            self.my_dialog.dnspbx_z.setEnabled(enable_stationing_widgets and (self.SVS.REFERENCE_LAYER_Z_ENABLED in self.system_vs))
+
+            self.my_dialog.pb_zoom_to_stationings.setEnabled(self.session_data.measure_feature is not None and self.session_data.measure_feature.is_valid)
+
+    def dlg_refresh_feature_selection_section(self):
+        """refreshes the Feature-Selection-TreeView in dialog
+            triggered by
+            dataLyr-edits,
+            dataLyr/referenceLyr/showLyr-provider-edits (e.g. filter)
+            layer-configuration-edits in data/reference/show-layer
+            plugin-settings-changes e.g. new show-layer
+            user-defined selection-change
+        """
+        # Rev. 2024-08-06
+
+        remove_icon = QtGui.QIcon(':icons/mIconClearTextHover.svg')
+        zoom_selected_icon = QtGui.QIcon(':icons/mIconZoom.svg')
+        invert_icon = QtGui.QIcon(':icons/mActionInvertSelection.svg')
+        move_icon = QtGui.QIcon(':icons/move_pol_feature.svg')
+        identify_icon = QtGui.QIcon(':icons/mActionIdentify.svg')
+        delete_icon = QtGui.QIcon(':icons/mActionDeleteSelectedFeatures.svg')
+        zoom_ref_feature_icon = QtGui.QIcon(':icons/mIconZoom.svg')
+        move_feature_icon = QtGui.QIcon(':icons/move_pol_feature.svg')
+        reposition_feature_icon = QtGui.QIcon(':icons/reposition_pol_feature.svg')
+
+        self.tool_check_selected_ids()
+
+        if self.my_dialog:
+            with (QtCore.QSignalBlocker(self.my_dialog.qtrv_feature_selection)):
+                with QtCore.QSignalBlocker(self.my_dialog.qtrv_feature_selection.selectionModel()):
+
+                    # order settings for later restore
+                    old_indicator = self.my_dialog.qtrv_feature_selection.header().sortIndicatorSection()
+                    old_order = self.my_dialog.qtrv_feature_selection.header().sortIndicatorOrder()
+                    expanded_ref_fids = []
+
+                    # store previous expanded branches for later restore
+                    for rc in range(self.my_dialog.qtrv_feature_selection.model().rowCount()):
+                        index = self.my_dialog.qtrv_feature_selection.model().index(rc, 0)
+                        if self.my_dialog.qtrv_feature_selection.isExpanded(index):
+                            expanded_ref_fids.append(index.data(self.ref_fid_role))
+
+                    self.my_dialog.pbtn_append_data_features.setEnabled(False)
+                    self.my_dialog.pbtn_append_show_features.setEnabled(False)
+                    self.my_dialog.pbtn_clear_features.setEnabled(False)
+                    self.my_dialog.pbtn_zoom_to_feature_selection.setEnabled(False)
+                    self.my_dialog.pbtn_transfer_feature_selection.setEnabled(False)
+                    self.my_dialog.pbtn_feature_selection_to_data_layer_filter.setEnabled(False)
+                    self.my_dialog.pbtn_select_features.setEnabled(False)
+
+                    # remove contents, but keep header
+                    self.my_dialog.qtrv_feature_selection.model().removeRows(0, self.my_dialog.qtrv_feature_selection.model().rowCount())
+
+                    if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+
+                        data_context = qgis.core.QgsExpressionContext()
+                        data_display_exp = qgis.core.QgsExpression(self.derived_settings.dataLyr.displayExpression())
+                        data_display_exp.prepare(data_context)
+
+                        ref_context = qgis.core.QgsExpressionContext()
+                        ref_display_exp = qgis.core.QgsExpression(self.derived_settings.refLyr.displayExpression())
+                        ref_display_exp.prepare(ref_context)
+
+                        num_data_features = self.derived_settings.dataLyr.featureCount()
+                        num_selected_data_features = len(self.session_data.selected_fids)
+
+                        # featureCount on showLyr, can be !=  self.derived_settings.dataLyr.featureCount() because of filter or failing joins
+                        num_show_features = 0
+                        show_context = None
+                        show_display_exp = None
+                        if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+                            num_show_features = self.derived_settings.showLyr.featureCount()
+                            show_context = qgis.core.QgsExpressionContext()
+                            show_display_exp = qgis.core.QgsExpression(self.derived_settings.showLyr.displayExpression())
+                            show_display_exp.prepare(show_context)
+
+                        self.my_dialog.pbtn_append_show_features.setEnabled(num_show_features > 0)
+                        # check the select-features-button, if at least one Show-Layer is complete and there are features in data-layer (quick&dirty, the show-layers should be checked...)
+                        self.my_dialog.pbtn_select_features.setEnabled(num_show_features > 0)
+
+                        self.my_dialog.pbtn_zoom_to_feature_selection.setEnabled(num_selected_data_features > 0)
+                        self.my_dialog.pbtn_transfer_feature_selection.setEnabled(num_selected_data_features > 0)
+
+                        self.my_dialog.pbtn_feature_selection_to_data_layer_filter.setEnabled((not self.derived_settings.dataLyr.isEditable()) and len(self.session_data.selected_fids) > 0)
+
+                        self.my_dialog.pbtn_clear_features.setEnabled(len(self.session_data.selected_fids) > 0)
+
+                        added_or_edited_fids = []
+                        if self.derived_settings.dataLyr.editBuffer():
+                            added_or_edited_fids = self.derived_settings.dataLyr.editBuffer().allAddedOrEditedFeatures()
+
+                        self.my_dialog.pbtn_append_data_features.setEnabled(num_data_features > 0)
+
+                        if self.session_data.selected_fids:
+                            # query dataLyr with self.session_data.selected_fids
+
+                            request = qgis.core.QgsFeatureRequest().setFilterFids(self.session_data.selected_fids)
+
+                            # correct order to iterate without subqueries on data-layer
+                            ref_id_clause = qgis.core.QgsFeatureRequest.OrderByClause(self.derived_settings.dataLyrReferenceField.name(), True)
+                            from_clause = qgis.core.QgsFeatureRequest.OrderByClause(self.derived_settings.dataLyrStationingField.name(), True)
+                            orderby = qgis.core.QgsFeatureRequest.OrderBy([ref_id_clause, from_clause])
+                            request.setOrderBy(orderby)
+
+                            root_item = self.my_dialog.qtrv_feature_selection.model().invisibleRootItem()
+                            last_ref_id = None
+                            reference_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                            for data_feature in self.derived_settings.dataLyr.getFeatures(request):
+                                fvs = self.tool_check_data_feature(data_feature=data_feature)
+                                fvs.check_data_feature_valid()
+
+                                data_fid = data_feature.id()
+                                ref_id = data_feature[self.stored_settings.dataLyrReferenceFieldName]
+                                if ref_id != last_ref_id:
+                                    last_ref_id = ref_id
+                                    reference_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                    # erst hinzufügen, sonst reference_item.index().row() == -1 reference_item.index().column == -1
+                                    root_item.appendRow(reference_item)
+
+                                    ref_feature, error_msg = self.tool_get_reference_feature(ref_id=ref_id)
+                                    if ref_feature:
+                                        ref_fid = ref_feature.id()
+                                        reference_item.setData(ref_fid, self.custom_sort_role)
+                                        reference_item.setData(ref_fid, self.ref_fid_role)
+                                        ref_context.setFeature(ref_feature)
+                                        display_exp = ref_display_exp.evaluate(ref_context)
+                                        # Note: evaluated ref_display_exp will be of type QVariant (stringified 'NULL') for fields without content, otherwise str
+                                        if display_exp == ref_fid or isinstance(display_exp, QtCore.QVariant):
+                                            reference_item.setText(f"# {ref_id}")
+                                        else:
+                                            reference_item.setText(f"# {ref_id} {display_exp}")
+                                        cell_widget = MyQtWidgets.QTwCellWidget()
+                                        qtb = MyQtWidgets.QTwToolButton()
+
+                                        qtb.setIcon(zoom_ref_feature_icon)
+                                        qtb.setToolTip(MY_DICT.tr('highlight_reference_feature_qtb_ttp'))
+                                        qtb.pressed.connect(self.st_toggle_ref_feature)
+                                        qtb.setProperty("ref_fid", ref_fid)
+
+                                        cell_widget.layout().addWidget(qtb)
+
+                                        qtb = MyQtWidgets.QTwToolButton()
+                                        qtb.setIcon(identify_icon)
+                                        qtb.setToolTip(MY_DICT.tr('show_feature_form_qtb_ttp'))
+                                        qtb.pressed.connect(self.st_open_ref_form)
+                                        qtb.setProperty("ref_fid", ref_fid)
+                                        cell_widget.layout().addWidget(qtb)
+
+                                        self.my_dialog.qtrv_feature_selection.setIndexWidget(reference_item.index(), cell_widget)
 
 
-                    data_measure = data_feature[self.ds.dataLyrMeasureField.name()]
+                                    else:
+                                        # folder for false assignments
+                                        reference_item.setText(MY_DICT.tr('unknown_reference_item', ref_id))
+                                        reference_item.setToolTip(error_msg)
 
-                    if self.ds.refLyr.crs().isGeographic():
-                        data_measure_rd = round(data_measure, 5)
-                    else:
-                        data_measure_rd = round(data_measure)
+                                id_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                id_item.setData(data_fid, self.custom_sort_role)
+                                id_item.setData(data_fid, self.data_fid_role)
+                                data_context.setFeature(data_feature)
+                                display_exp = data_display_exp.evaluate(data_context)
 
-                    ref_context.setFeature(ref_feature)
-                    ref_evaled_exp = ref_display_exp.evaluate(ref_context)
-                    ref_label = f"'{ref_evaled_exp}'"
+                                if display_exp == data_fid or isinstance(display_exp, QtCore.QVariant):
+                                    id_item.setText(f"# {data_fid}")
+                                else:
+                                    id_item.setText(f"# {data_fid} {display_exp}")
 
-                    # expression with dataLyrIdField as single field
-                    if ref_display_exp.isField() and self.ds.refLyrPkField.name() in ref_display_exp.referencedColumns():
-                        if self.ds.refLyrPkField.type() in integer_field_types:
-                            ref_label = f"# {ref_evaled_exp}"
+                                stationing = data_feature[self.stored_settings.dataLyrStationingFieldName]
+                                from_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                from_item.setData(stationing, self.custom_sort_role)
+                                from_item.setText(str(stationing))
+                                from_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignCenter)
 
+                                show_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                show_fid = None
+                                if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+                                    show_feature, error_msg = self.tool_get_show_feature(data_fid=data_fid)
+                                    if show_feature:
+                                        show_fid = show_feature.id()
+                                        show_item = MyQtWidgets.QStandardItemCustomSort(self.custom_sort_role)
+                                        show_item.setData(show_fid, self.custom_sort_role)
+                                        show_item.setData(show_fid, self.show_fid_role)
+                                        show_context.setFeature(show_feature)
+                                        display_exp = show_display_exp.evaluate(show_context)
 
-                    show_back_ref_id = None
-                    show_label_plus = None
+                                        if display_exp == show_fid or isinstance(display_exp, QtCore.QVariant):
+                                            show_item.setText(f"# {show_fid}")
+                                        else:
+                                            show_item.setText(f"{display_exp}")
 
-                    if show_feature:
-                        show_back_ref_id = show_feature[self.ds.showLyrBackReferenceField.name()]
-                        show_context.setFeature(show_feature)
-                        show_evaled_exp = show_display_exp.evaluate(show_context)
-                        show_label_plus = f"'{show_evaled_exp}'"
-                        # expression with dataLyrIdField as single field
-                        if show_display_exp.isField() and self.ds.showLyrBackReferenceField.name() in show_display_exp.referencedColumns():
-                            if self.ds.showLyrBackReferenceField.type() in integer_field_types:
-                                show_label_plus = f"# {show_evaled_exp}"
-                        else:
-                            if self.ds.showLyrBackReferenceField.type() in integer_field_types:
-                                show_label_plus = f"# {show_back_ref_id} {show_evaled_exp}"
-                            else:
-                                show_label_plus = f"'{show_back_ref_id}' {show_evaled_exp}"
+                                all_items = [id_item, from_item, show_item]
 
-                    # col 0 (the initial sort-column): line_reference from ... to
-                    cc = 0
+                                if fvs.is_valid:
+                                    for item in all_items:
+                                        item.setForeground(QtGui.QColor('green'))
+                                else:
+                                    for item in all_items:
+                                        item.setToolTip(MY_DICT.tr('mvs_data_feature_invalid', data_fid, MY_DICT.tr(fvs.first_fail_flag)))
+                                        item.setForeground(QtGui.QColor('red'))
+                                        # no bold font possible because of delegate
 
-                    item = tools.MyQtWidgets.QTableWidgetItemCustomSort(256)
-                    item.setData(256, data_pk)
+                                reference_item.appendRow(all_items)
 
-                    item.setText(f"{data_label}")
-                    self.my_dialogue.qtw_selected_pks.setItem(rc, cc, item)
+                                cell_widget = MyQtWidgets.QTwCellWidget()
 
-                    c_wdg = QtWidgets.QWidget()
-                    c_wdg.setLayout(QtWidgets.QHBoxLayout())
-                    c_wdg.layout().setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-                    c_wdg.layout().setContentsMargins(2, 0, 2, 0)
-                    c_wdg.layout().setSpacing(2)
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(remove_icon)
+                                qtb.setToolTip(MY_DICT.tr('remove_from_selection_qtb_ttp'))
+                                qtb.pressed.connect(self.st_remove_from_feature_selection)
+                                qtb.setProperty("data_fid", data_fid)
+                                cell_widget.layout().addWidget(qtb)
 
-                    qtb = QtWidgets.QToolButton()
-                    qtb.setIcon(remove_icon)
-                    qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Remove feature from selection"))
-                    qtb.clicked.connect(self.s_remove_from_feature_selection)
-                    qtb.setProperty("edit_pk", edit_pk)
-                    qtb.setFixedSize(QtCore.QSize(20, 20))
-                    c_wdg.layout().addWidget(qtb)
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setProperty("data_fid", data_fid)
+                                qtb.setIcon(identify_icon)
+                                qtb.setToolTip(MY_DICT.tr('show_feature_form_qtb_ttp'))
+                                qtb.pressed.connect(self.st_open_data_form)
+                                cell_widget.layout().addWidget(qtb)
 
-                    qtb = QtWidgets.QToolButton()
-                    qtb.setIcon(highlight_icon)
-                    qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Highlight feature and select for edit"))
-                    qtb.clicked.connect(self.s_highlight_edit_pk)
-                    qtb.setProperty("edit_pk", edit_pk)
-                    qtb.setFixedSize(QtCore.QSize(20, 20))
-                    c_wdg.layout().addWidget(qtb)
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(zoom_selected_icon)
+                                qtb.setEnabled(fvs.is_valid)
+                                if fvs.is_valid:
+                                    qtb.setProperty("data_fid", data_fid)
+                                    qtb.pressed.connect(self.cvs_toggle_feature_markers)
+                                    qtb.setToolTip(MY_DICT.tr('zoom_to_edit_pk_ttp'))
+                                cell_widget.layout().addWidget(qtb)
 
-                    qtb = QtWidgets.QToolButton()
-                    qtb.setIcon(pan_icon)
-                    qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Pan to feature and select for edit"))
-                    qtb.clicked.connect(self.s_pan_edit_pk)
-                    qtb.setProperty("edit_pk", edit_pk)
-                    qtb.setFixedSize(QtCore.QSize(20, 20))
-                    c_wdg.layout().addWidget(qtb)
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setProperty("data_fid", data_fid)
+                                qtb.setIcon(invert_icon)
+                                qtb.setToolTip(MY_DICT.tr('select_in_layer_qtb_ttp'))
+                                qtb.pressed.connect(self.st_select_in_layer)
+                                cell_widget.layout().addWidget(qtb)
 
-                    qtb = QtWidgets.QToolButton()
-                    qtb.setIcon(identify_icon)
-                    qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Show feature-form"))
-                    qtb.clicked.connect(self.s_open_data_form)
-                    qtb.setProperty("edit_pk", edit_pk)
-                    qtb.setFixedSize(QtCore.QSize(20, 20))
-                    c_wdg.layout().addWidget(qtb)
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(delete_icon)
+                                qtb.setEnabled((self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_DELETE_ENABLED) in self.system_vs)
+                                if (self.SVS.DATA_LAYER_EDITABLE | self.SVS.DATA_LAYER_DELETE_ENABLED) in self.system_vs:
+                                    qtb.setToolTip(MY_DICT.tr('delete_feature_qtb_ttp'))
+                                    qtb.pressed.connect(self.st_delete_feature)
+                                    qtb.setProperty("data_fid", data_fid)
+                                cell_widget.layout().addWidget(qtb)
 
-                    self.my_dialogue.qtw_selected_pks.setCellWidget(rc, cc, c_wdg)
+                                self.my_dialog.qtrv_feature_selection.setIndexWidget(id_item.index(), cell_widget)
 
-                    cc += 1
+                                cell_widget = MyQtWidgets.QTwCellWidget()
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(move_icon)
+                                qtb.setEnabled(fvs.is_valid and self.SVS.DATA_LAYER_EDITABLE in self.system_vs)
+                                if fvs.is_valid and self.SVS.DATA_LAYER_EDITABLE in self.system_vs:
+                                    qtb.setToolTip(MY_DICT.tr('pol_move_feature_ttp'))
+                                    qtb.clicked.connect(self.stm_move_feature)
+                                    qtb.setProperty("data_fid", data_fid)
+                                cell_widget.layout().addWidget(qtb)
 
-                    # Reference-Layer use expression and append ID, if not contained in expression
-                    item = tools.MyQtWidgets.QTableWidgetItemMultipleSort(256, 257)
-                    item.setData(256, ref_label)
-                    item.setData(257, data_measure)
-                    item.setText(f"{ref_label} {data_measure_rd}")
-                    self.my_dialogue.qtw_selected_pks.setItem(rc, cc, item)
+                                qtb = MyQtWidgets.QTwToolButton()
+                                qtb.setIcon(reposition_feature_icon)
+                                qtb.setEnabled(self.SVS.DATA_LAYER_EDITABLE in self.system_vs)
+                                if self.SVS.DATA_LAYER_EDITABLE in self.system_vs:
+                                    qtb.setToolTip(MY_DICT.tr('reposition_feature_qtb_ttp'))
+                                    qtb.clicked.connect(self.stm_reposition_feature)
+                                    qtb.setProperty("data_fid", data_fid)
+                                cell_widget.layout().addWidget(qtb)
+                                self.my_dialog.qtrv_feature_selection.setIndexWidget(from_item.index(), cell_widget)
 
-                    # Reference-Layer with highlight, zoom, identify, FID and Label-Expression
-                    c_wdg = QtWidgets.QWidget()
-                    c_wdg.setLayout(QtWidgets.QHBoxLayout())
-                    c_wdg.layout().setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-                    c_wdg.layout().setContentsMargins(2, 0, 2, 0)
-                    c_wdg.layout().setSpacing(2)
+                                if show_fid:
+                                    cell_widget = MyQtWidgets.QTwCellWidget()
+                                    qtb = MyQtWidgets.QTwToolButton()
+                                    # Note: st_open_show_form expects data_fid as attribute
+                                    qtb.setProperty("data_fid", data_fid)
+                                    qtb.setIcon(identify_icon)
+                                    qtb.setToolTip(MY_DICT.tr('show_feature_form_qtb_ttp'))
+                                    qtb.pressed.connect(self.st_open_show_form)
+                                    cell_widget.layout().addWidget(qtb)
+                                    self.my_dialog.qtrv_feature_selection.setIndexWidget(show_item.index(), cell_widget)
 
-                    qtb = QtWidgets.QToolButton()
-                    qtb.setIcon(highlight_icon)
-                    qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Highlight reference-feature"))
-                    qtb.clicked.connect(self.s_highlight_ref_feature_by_edit_pk)
-                    qtb.setProperty("edit_pk", edit_pk)
-                    qtb.setFixedSize(QtCore.QSize(20, 20))
-                    c_wdg.layout().addWidget(qtb)
+                    # restore previous sort-settings
+                    self.my_dialog.qtrv_feature_selection.sortByColumn(old_indicator, old_order)
 
-                    qtb = QtWidgets.QToolButton()
-                    qtb.setIcon(pan_icon)
-                    qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Zoom to reference-feature"))
-                    qtb.clicked.connect(self.s_zoom_ref_feature_by_edit_pk)
-                    qtb.setProperty("edit_pk", edit_pk)
-                    qtb.setFixedSize(QtCore.QSize(20, 20))
-                    c_wdg.layout().addWidget(qtb)
+                    for rc in range(self.my_dialog.qtrv_feature_selection.model().rowCount()):
+                        index = self.my_dialog.qtrv_feature_selection.model().index(rc, 0)
+                        if index.data(self.ref_fid_role) in expanded_ref_fids:
+                            self.my_dialog.qtrv_feature_selection.setExpanded(index, True)
 
-                    qtb = QtWidgets.QToolButton()
-                    qtb.setIcon(identify_icon)
-                    qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                    qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Show reference-feature-attribute-form"))
-                    qtb.clicked.connect(self.s_open_ref_form_by_edit_pk)
-                    qtb.setProperty("edit_pk", edit_pk)
-                    qtb.setFixedSize(QtCore.QSize(20, 20))
-                    c_wdg.layout().addWidget(qtb)
+                    if self.session_data.edit_feature:
+                        self.dlg_select_feature_selection_row(self.session_data.edit_feature.data_fid)
 
-                    self.my_dialogue.qtw_selected_pks.setCellWidget(rc, cc, c_wdg)
+    def st_select_in_layer(self):
+        """selects/unselects feature in data- and show-layer(s) from qtrv_feature_selection"""
+        # Rev. 2024-08-06
+        selection_mode = 'replace_selection'
+        if QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers():
+            selection_mode = 'remove_from_selection'
+        elif QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers():
+            selection_mode = 'add_to_selection'
 
-                    if self.cf.show_layer_complete:
-                        cc += 1
-                        item = tools.MyQtWidgets.QTableWidgetItemCustomSort(256)
-                        item.setData(256, show_back_ref_id)
-                        item.setData(257, edit_pk)
-                        item.setText(show_label_plus)
+        data_fid = self.sender().property('data_fid')
+        data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+        if data_feature:
 
-                        self.my_dialogue.qtw_selected_pks.setItem(rc, cc, item)
+            show_fid = None
+            if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                data_id = data_feature[self.stored_settings.dataLyrIdFieldName]
+                show_feature = tools.MyTools.get_feature_by_value(self.derived_settings.showLyr, self.derived_settings.showLyrBackReferenceField, data_id)
+                if show_feature and show_feature.isValid():
+                    show_fid = show_feature.id()
+                else:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('no_show_feature_for_data_feature', data_id))
 
-                        c_wdg = QtWidgets.QWidget()
-                        c_wdg.setLayout(QtWidgets.QHBoxLayout())
-                        c_wdg.layout().setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-                        c_wdg.layout().setContentsMargins(2, 0, 2, 0)
-                        c_wdg.layout().setSpacing(2)
-
-                        qtb = QtWidgets.QToolButton()
-                        qtb.setIcon(identify_icon)
-                        qtb.setCursor(QtCore.Qt.PointingHandCursor)
-                        qtb.setToolTip(QtCore.QCoreApplication.translate('PolEvt', "Open attribute-form for Show-Layer"))
-                        qtb.clicked.connect(self.s_open_show_form_by_edit_pk)
-                        qtb.setProperty("edit_pk", edit_pk)
-                        qtb.setFixedSize(QtCore.QSize(20, 20))
-                        c_wdg.layout().addWidget(qtb)
-                        self.my_dialogue.qtw_selected_pks.setCellWidget(rc, cc, c_wdg)
-
-                    rc += 1
-
-                self.dlg_0 = tools.MyQtWidgets.LambdaDelegate(lambda val: " " * 30 + str(val))
-                self.my_dialogue.qtw_selected_pks.setItemDelegateForColumn(0, self.dlg_0)
-                self.dlg_1 = tools.MyQtWidgets.LambdaDelegate(lambda val: " " * 25 + str(val))
-                self.my_dialogue.qtw_selected_pks.setItemDelegateForColumn(1, self.dlg_1)
-
-                if self.cf.show_layer_complete:
-                    # only one icon ➜ less padding
-                    self.dlg_2 = tools.MyQtWidgets.LambdaDelegate(lambda val: " " * 10 + str(val))
-                    self.my_dialogue.qtw_selected_pks.setItemDelegateForColumn(2, self.dlg_2)
-
-                self.my_dialogue.qtw_selected_pks.resizeRowsToContents()
-                self.my_dialogue.qtw_selected_pks.resizeColumnsToContents()
-
-                # restore previous sort-settings
-                self.my_dialogue.qtw_selected_pks.sortItems(prev_sort_col_idx, prev_sort_order)
-
-            self.my_dialogue.pbtn_select_features.setEnabled(
-                self.cf.reference_layer_complete and
-                self.cf.data_layer_complete and
-                self.cf.show_layer_complete
-            )
-            self.my_dialogue.pbtn_clear_features.setEnabled(
-                self.cf.reference_layer_complete and
-                self.cf.data_layer_complete and
-                len(self.rs.selected_pks) > 0
-            )
-            self.my_dialogue.pbtn_zoom_to_feature_selection.setEnabled(
-                self.cf.reference_layer_complete and
-                self.cf.data_layer_complete and
-                len(self.rs.selected_pks) > 0
-            )
-            self.my_dialogue.pbtn_insert_all_features.setEnabled(
-                self.cf.reference_layer_complete and
-                self.cf.data_layer_complete
-            )
-            self.my_dialogue.pbtn_insert_selected_data_features.setEnabled(
-                self.cf.reference_layer_complete and
-                self.cf.data_layer_complete
-            )
-            self.my_dialogue.pbtn_insert_selected_show_features.setEnabled(
-                self.cf.reference_layer_complete and
-                self.cf.data_layer_complete and
-                self.cf.show_layer_complete
-            )
-            # checkable Pushbutton
-            with QtCore.QSignalBlocker(self.my_dialogue.pbtn_select_features):
-                self.my_dialogue.pbtn_select_features.setChecked(
-                    self.cf.reference_layer_complete and
-                    self.cf.data_layer_complete and
-                    self.cf.show_layer_complete and
-                    self.rs.tool_mode == 'select_features'
-                )
-
-    def s_open_data_form(self):
-        """opens Data-form for dataLyr from selection-list-cell-widget, edit_pk stored as property"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
-        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-        if data_feature and data_feature.isValid():
-            self.iface.openFeatureForm(self.ds.dataLyr, data_feature, True)
+            if selection_mode == 'replace_selection':
+                self.derived_settings.dataLyr.removeSelection()
+                self.derived_settings.dataLyr.select(data_fid)
+                if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                    self.derived_settings.showLyr.removeSelection()
+                    if show_fid is not None:
+                        self.derived_settings.showLyr.select(show_fid)
+            elif selection_mode == 'remove_from_selection':
+                self.derived_settings.dataLyr.deselect(data_fid)
+                if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                    if show_fid is not None:
+                        self.derived_settings.showLyr.deselect(show_fid)
+            else:
+                self.derived_settings.dataLyr.select(data_fid)
+                if self.SVS.SHOW_LAYER_COMPLETE in self.system_vs:
+                    if show_fid is not None:
+                        self.derived_settings.showLyr.select(show_fid)
         else:
-            self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with ID {apos}{0}{apos} in Data-Layer {apos}{1}{apos}"),edit_pk, self.ds.dataLyr.name()))
+            self.dlg_append_log_message('WARNING', error_msg)
 
-    def s_highlight_edit_pk(self):
-        """select for edit and pan to Feature from selection-list-cell-widget, edit_pk stored as property"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
-        self.set_edit_pk(edit_pk, False)
+    def st_open_data_form(self):
+        """opens form for dataLyr
+            called from QTableWidget
+            data_fid stored as property in cell-widget"""
+        # Rev. 2024-08-06
+        data_fid = self.sender().property('data_fid')
 
-    def s_remove_from_feature_selection(self):
-        """removes this feature/row from self.rs.selected_pks/selection-list, edit_pk stored as property in cell-widget"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
+        data_feature, error_msg = self.tool_get_data_feature(data_fid=data_fid)
+        if data_feature:
+            extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+            self.tool_select_feature(data_fid, ['sn', 'rfl'], ['sn'], extent_mode)
+            feature_form = tools.MyTools.get_feature_form(self.iface, self.derived_settings.dataLyr, data_feature, False, 500, 300)
+            feature_form.show()
+        else:
+            self.dlg_append_log_message("WARNING", error_msg)
 
-        if edit_pk in self.rs.selected_pks:
-            self.rs.selected_pks.remove(edit_pk)
+    def st_remove_from_feature_selection(self):
+        """removes this feature/row from self.session_data.selected_fids/selection-list
+            data_fid stored as property in cell-widget
+            called from QTableWidget"""
+        # Rev. 2024-08-06
+        data_fid = self.sender().property('data_fid')
+        if self.session_data.edit_feature and data_fid == self.session_data.edit_feature.data_fid:
+            self.session_data.edit_feature = None
+            self.dlg_refresh_measure_section()
+            self.cvs_hide_markers()
+
+        if data_fid in self.session_data.selected_fids:
+            self.session_data.selected_fids.remove(data_fid)
             self.dlg_refresh_feature_selection_section()
 
-        if edit_pk == self.rs.edit_pk:
-            self.rs.edit_pk = None
-            self.dlg_refresh_edit_section()
-
-    def s_pan_edit_pk(self):
-        """edit and pan to feature from selction-list"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
-        self.set_edit_pk(edit_pk, True)
-
-    def s_open_show_form_by_edit_pk(self):
-        """opens feature-form for showLyr from selection-list, edit_pk stored as property in cell-widget"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
-        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-        if data_feature and data_feature.isValid():
-            show_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.showLyr, self.ds.showLyrBackReferenceField, edit_pk)
-            if show_feature and show_feature.isValid():
-                self.iface.openFeatureForm(self.ds.showLyr, show_feature, True)
+    def st_open_show_form(self):
+        """opens feature-form for showLyr from selection-list
+            data_fid stored as property in cell-widget
+            called from QTableWidget"""
+        # Rev. 2024-08-06
+        # bit complicated because fid and id/pk must not be identical:
+        # from data_fid to data_id to show-feature
+        data_fid = self.sender().property('data_fid')
+        if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+            show_feature, error_msg = self.tool_get_show_feature(data_fid=data_fid)
+            if show_feature:
+                extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+                self.tool_select_feature(data_fid, ['sn', 'rfl'], ['sn'], extent_mode)
+                feature_form = tools.MyTools.get_feature_form(self.iface, self.derived_settings.showLyr, show_feature)
+                feature_form.show()
             else:
-                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in Back-Reference-field {apos}{1}{apos} of Show-Layer {apos}{2}{apos}"),edit_pk, self.ds.showLyrBackReferenceField.name(), self.ds.showLyr.name()))
+                self.dlg_append_log_message('WARNING', error_msg)
 
-    def s_open_ref_form_by_edit_pk(self):
-        """opens feature-form for refLyr from selection-list, edit_pk stored as property in cell-widget"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
-        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-        if data_feature and data_feature.isValid():
-            ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
-            if ref_feature and ref_feature.isValid():
-                self.iface.openFeatureForm(self.ds.refLyr, ref_feature, True)
+    def st_open_ref_form(self):
+        """opens feature-form for refLyr from selection-list
+            ref_fid is stored as property in cell-widget
+            called from QTableWidget
+            """
+        # Rev. 2024-08-06
+        ref_fid = self.sender().property('ref_fid')
+        zoom_to_feature = bool(QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers())
+
+        if self.SVS.REFERENCE_LAYER_CONNECTED in self.system_vs:
+            ref_feature, error_msg = self.tool_get_reference_feature(ref_fid=ref_fid)
+            if ref_feature:
+                feature_form = tools.MyTools.get_feature_form(self.iface, self.derived_settings.refLyr, ref_feature)
+                feature_form.show()
+                # draw and optionally zoom:
+                if ref_feature.hasGeometry():
+                    self.cvs_draw_reference_geom(reference_geom=ref_feature.geometry(), zoom_to_feature=zoom_to_feature)
             else:
-                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in field {apos}{1}{apos} of Reference-Layer {apos}{2}{apos}"),data_feature[self.ds.dataLyrReferenceField.name()], self.ds.dataLyrReferenceField.name(), self.ds.refLyr.name()))
+                self.dlg_append_log_message("WARNING", error_msg)
 
-    def s_highlight_ref_feature_by_edit_pk(self):
-        """highlights referenced line-feature from selection-list, edit_pk stored as property in cell-widget"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
-        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-        if data_feature and data_feature.isValid():
-            ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
-            if ref_feature and ref_feature.isValid():
-                self.draw_reference_geom(ref_feature.id())
+    def st_toggle_ref_feature(self):
+        """shows/hide/zooms a reference-feature-geometry
+            ref_fid is stored as property in cell-widget
+            called from QTableWidget
+            zoom to feature with shift-click"""
+        # Rev. 2024-08-06
+        ref_fid = self.sender().property('ref_fid')
+        zoom_to_feature = bool(QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers())
+        if self.SVS.REFERENCE_LAYER_USABLE in self.system_vs:
+            draw_this_line = zoom_to_feature
+            draw_this_line |= not self.rb_rfl.isVisible()
+            draw_this_line |= ref_fid != self.session_data.highlighted_ref_fid
+
+            if draw_this_line:
+                self.cvs_draw_reference_geom(ref_fid=ref_fid, zoom_to_feature=zoom_to_feature)
+                self.session_data.highlighted_ref_fid = ref_fid
             else:
-                self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in field {apos}{1}{apos} of Reference-Layer {apos}{2}{apos}"),data_feature[self.ds.dataLyrReferenceField.name()], self.ds.dataLyrReferenceField.name(), self.ds.refLyr.name()))
+                self.rb_rfl.hide()
+                self.session_data.highlighted_ref_fid = None
 
-    def s_zoom_ref_feature_by_edit_pk(self):
-        """highlight and zoom to referenced line-feature from selection-list, edit_pk stored as property in cell-widget"""
-        # Rev. 2023-05-03
-        edit_pk = self.sender().property('edit_pk')
-        data_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.dataLyr, self.ds.dataLyrIdField, edit_pk)
-        if data_feature and data_feature.isValid():
-            ref_feature = tools.MyToolFunctions.get_feature_by_value(self.ds.refLyr, self.ds.refLyrPkField, data_feature[self.ds.dataLyrReferenceField.name()])
-            if ref_feature and ref_feature.isValid():
-                if ref_feature.hasGeometry() and not ref_feature.geometry().isEmpty():
-                    extent = ref_feature.geometry().boundingBox()
-                    source_crs = self.ds.refLyr.crs()
-                    target_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-                    tr = qgis.core.QgsCoordinateTransform(source_crs, target_crs, qgis.core.QgsProject.instance())
-                    extent = tr.transformBoundingBox(extent)
-                    self.iface.mapCanvas().setExtent(extent)
-                    self.iface.mapCanvas().zoomByFactor(1.1)
-                    self.draw_reference_geom(ref_feature.id())
-                else:
-                    self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "Feature without geometry (Reference-Layer {apos}{0}{apos}, field {apos}{1}{apos}, value {apos}{2}{apos})"),self.ds.refLyr.name(), self.ds.dataLyrReferenceField.name(), data_feature[self.ds.dataLyrReferenceField.name()]))
-        else:
-            self.push_messages(warning_msg=qt_format(QtCore.QCoreApplication.translate('PolEvt', "no feature with value {apos}{0}{apos} in field {apos}{1}{apos} of Reference-Layer {apos}{2}{apos}"),data_feature[self.ds.dataLyrReferenceField.name()], self.ds.dataLyrReferenceField.name(), self.ds.refLyr.name()))
-
-    def store_settings(self):
-        """store all permanent settings to project
+    def sys_store_settings(self):
+        """store all permanent settings to qgis.core.QgsProject.instance()
         the "internal" values (with underscores) are stored (with underscores too) and restored later
-        Triggered on unload and qgis.core.QgsProject.instance().writeProject(...) *before* the project is saved to file
+        Triggered on sys_unload and qgis.core.QgsProject.instance().writeProject(...) *before* the project is saved to file
+        changes only appear, if the project is saved to disk
         """
-        # Rev. 2023-04-27
+        # Rev. 2024-08-06
         # filter: startswith('_')
         # => use "hidden" properties, not their property-setters
-        property_dict = {prop: getattr(self.ss, prop) for prop in dir(self.StoredSettings) if prop.startswith('_') and not prop.startswith('__')}
+        property_dict = {prop: getattr(self.stored_settings, prop) for prop in dir(StoredSettings) if prop.startswith('_') and not prop.startswith('__')}
 
         for prop_name in property_dict:
             prop_value = property_dict[prop_name]
@@ -3988,40 +6844,215 @@ class PolEvt(qgis.gui.QgsMapToolEmitPoint):
             else:
                 qgis.core.QgsProject.instance().removeEntry('LinearReferencing', key)
 
-    def unload(self):
-        """triggered by LinearReference => unload() and project.close()
-        for project.close only necessary for the layer-actions, which are stored in project-file
-        all other Qt-Objects (signals/slots...) are destroyed with their owner (QApplication) and not saved to project-file
-        """
-        # Rev. 2023-04-27
-
-        # check and write the settings back to project
-        self.check_settings()
-        self.store_settings()
-
-        self.disconnect_all_layers()
-
+    def sys_unload(self):
+        """called from LinearReference.sys_unload() on plugin-sys_unload and/or QGis-shut-down or project-close
+            checks and writes the settings back to project
+            removes dialog and temporal graphics
+            """
+        # Rev. 2024-08-06
         try:
-            # remove canvas-graphics
-            self.iface.mapCanvas().scene().removeItem(self.vm_pt_measure)
-            del self.vm_pt_measure
-            self.iface.mapCanvas().scene().removeItem(self.vm_pt_edit)
-            del self.vm_pt_edit
-            self.iface.mapCanvas().scene().removeItem(self.rb_ref)
-            del self.rb_ref
-            self.iface.mapCanvas().scene().removeItem(self.rb_selection_rect)
-            del self.rb_selection_rect
+            # close *and* delete dialog
+            self.my_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+            self.my_dialog.close()
+            self.my_dialog = None
+            # no delete, because sometimes crash on unload, possibly the dialog is still required from LinearReference.py?
+            # del self.my_dialog
 
-            # remove dialog
-            self.my_dialogue.close()
-            del self.my_dialogue
+            self.sys_store_settings()
+
+            # remove canvas-graphics
+            self.cvs_hide_markers()
+
+            # hide orphaned snap-indicators
+            self.cvs_hide_snap()
+
+            self.iface.mapCanvas().scene().removeItem(self.vm_sn)
+            self.iface.mapCanvas().scene().removeItem(self.vm_en)
+            self.iface.mapCanvas().scene().removeItem(self.vm_pt_cn)
+            self.iface.mapCanvas().scene().removeItem(self.rb_rfl)
+            self.iface.mapCanvas().scene().removeItem(self.rb_selection_rect)
+            self.iface.mapCanvas().scene().removeItem(self.rb_rfl_diff_cu)
+            self.iface.mapCanvas().scene().removeItem(self.rb_rfl_diff_ca)
+
+            self.sys_disconnect_layer_slots()
+            self.gui_remove_layer_actions()
+
+            for conn_id in self.application_slot_cons:
+                qgis.core.QgsApplication.instance().disconnect(conn_id)
+            self.application_slot_cons = []
+
+            for conn_id in self.canvas_slot_cons:
+                self.iface.mapCanvas().disconnect(conn_id)
+            self.canvas_slot_cons = []
+
+            # it was possibly disabled
+            # => restore previous setting
+            # qgis.core.QgsSettings().setValue('app/askToSaveMemoryLayers', self.save_memory_layers)
+
         except Exception as e:
-            # AttributeError: 'PolEvt' object has no attribute 'vm_pt_measure'
-            # print(f"Expected exception in {gdp()}: \"{e}\"")
             pass
+
+    def sys_disconnect_layer_slots(self):
+        """disconnect all in registered layer-slot-connections
+        called on unload"""
+        # Rev. 2024-08-06
+        # traverse signal_slot_cons, check if layer still exists and disconnect the signals/slots
+        for layer_id in self.signal_slot_cons:
+            layer = qgis.core.QgsProject.instance().mapLayer(layer_id)
+            if layer:
+                for conn_signal in self.signal_slot_cons[layer_id]:
+                    for conn_function in self.signal_slot_cons[layer_id][conn_signal]:
+                        conn_id = self.signal_slot_cons[layer_id][conn_signal][conn_function]
+                        layer.disconnect(conn_id)
+            else:
+                # orphaned connection-object for not existing layer
+                pass
+
+        self.signal_slot_cons = {}
 
     def flags(self):
         """reimplemented for tool_mode 'select_features' with ShiftModifier: disables the default-zoom-behaviour
-        see: https://gis.stackexchange.com/questions/449523/override-the-zoom-behaviour-of-qgsmaptoolextent"""
-        # Rev. 2023-05-03
+            see: https://gis.stackexchange.com/questions/449523/override-the-zoom-behaviour-of-qgsmaptoolextent"""
+        # Rev. 2024-08-06
         return super().flags() & ~qgis.gui.QgsMapToolEmitPoint.AllowZoomRect
+
+    class SVS(Flag):
+        """SystemValidState
+        Store and check system-settings
+        stored in self.system_vs
+        positve-flags: each bit symbolizes a fulfilled precondition
+        """
+        # Rev. 2024-08-06
+        INIT = auto()
+
+        REFERENCE_LAYER_EXISTS = auto()
+        REFERENCE_LAYER_HAS_VALID_CRS = auto()
+        REFERENCE_LAYER_IS_LINESTRING = auto()
+        REFERENCE_LAYER_CONNECTED = auto()
+        REFERENCE_LAYER_M_ENABLED = auto()
+        REFERENCE_LAYER_Z_ENABLED = auto()
+        REFERENCE_LAYER_ID_FIELD_DEFINED = auto()
+        REFERENCE_LAYER_INSERT_ENABLED = auto()
+        REFERENCE_LAYER_UPDATE_ENABLED = auto()
+        REFERENCE_LAYER_DELETE_ENABLED = auto()
+        REFERENCE_LAYER_EDITABLE = auto()
+
+        DATA_LAYER_EXISTS = auto()
+        DATA_LAYER_CONNECTED = auto()
+        DATA_LAYER_ID_FIELD_DEFINED = auto()
+        DATA_LAYER_REFERENCE_FIELD_DEFINED = auto()
+        DATA_LAYER_STATIONING_FIELD_DEFINED = auto()
+
+        DATA_LAYER_INSERT_ENABLED = auto()
+        DATA_LAYER_UPDATE_ENABLED = auto()
+        DATA_LAYER_DELETE_ENABLED = auto()
+        DATA_LAYER_EDITABLE = auto()
+
+        SHOW_LAYER_EXISTS = auto()
+        SHOW_LAYER_CONNECTED = auto()
+        SHOW_LAYER_BACK_REFERENCE_FIELD_DEFINED = auto()
+
+        # some combinations for convenience:
+        REFERENCE_LAYER_USABLE = INIT | REFERENCE_LAYER_EXISTS | REFERENCE_LAYER_HAS_VALID_CRS | REFERENCE_LAYER_IS_LINESTRING | REFERENCE_LAYER_CONNECTED
+
+        REFERENCE_LAYER_COMPLETE = INIT | REFERENCE_LAYER_USABLE | REFERENCE_LAYER_ID_FIELD_DEFINED
+
+        DATA_LAYER_COMPLETE = INIT | DATA_LAYER_EXISTS | DATA_LAYER_CONNECTED | DATA_LAYER_ID_FIELD_DEFINED | DATA_LAYER_REFERENCE_FIELD_DEFINED | DATA_LAYER_STATIONING_FIELD_DEFINED
+
+        REFERENCE_AND_DATA_LAYER_COMPLETE = INIT | REFERENCE_LAYER_COMPLETE | DATA_LAYER_COMPLETE
+
+        SHOW_LAYER_COMPLETE = INIT | SHOW_LAYER_EXISTS | SHOW_LAYER_CONNECTED | SHOW_LAYER_BACK_REFERENCE_FIELD_DEFINED
+
+        ALL_LAYERS_COMPLETE = REFERENCE_AND_DATA_LAYER_COMPLETE | SHOW_LAYER_COMPLETE
+
+        def __str__(self):
+            """stringify implemented for debug-purpose"""
+            # Rev. 2024-08-21
+            result_str = ''
+
+            all_items = [item.name for item in self.__class__]
+
+            longest_item = max(all_items, key=len)
+            max_len = len(longest_item)
+
+            # single-bit-flags
+            for item in self.__class__:
+                # format(item.value, '024b')
+                if item.value == (item.value & -item.value):
+                    result_str += f"{item.name:<{max_len}}    {item in self}\n"
+            # multi-bit-flags
+            for item in self.__class__:
+                # format(item.value, '024b')
+                if item.value != (item.value & -item.value):
+                    result_str += f"* {item.name:<{max_len}}  {item in self}\n"
+
+            return result_str
+
+
+def set_pol_edit_fid(fid: int, layer_id: str) -> None:
+    """
+    Attached to layer.actions, select LinearReferencing-PoL-Feature from table or form
+    implemented for dataLyr/showLyr
+    The fid gets positive, as soon as the new dataFeature is committed, but must not have the same fid in both layers, e.g. if the showLyr is not a virtual one but comes from a database-view.
+    so savely distinguish, from which layer this featureAction was triggered
+
+    Not-committed data-features with negative fids are not listed in any Show-Layer.
+
+    Sample-Code for Action (a QGis expression, where some marked [%...%] wildcards will be replaced by current values):
+    .. code-block:: text
+
+        from LinearReferencing.map_tools.PolEvt import set_pol_edit_fid
+        set_pol_edit_fid([%@id%],'[%@layer_id%]')
+
+
+    :param fid: in action-code the wildcard ``[%@id%]`` will be replaced with the fid of the current feature. The value is negative, if the feature is only in edit-buffer, new table-row not yet saved.
+    :param layer_id: in action-code the Wildcard ``[%@layer_id%]`` will be replaced with the ID of the layer, data-layer or show-layer from Map-Tool PolEvt accepted
+    """
+    # Rev. 2024-08-06
+    _plugin_name = 'LinearReferencing'
+
+    if _plugin_name in qgis.utils.plugins:
+        lref_plugin = qgis.utils.plugins[_plugin_name]
+        # access initialized Plugin
+        # should not be necessary, because the layer-actions are removed on unload
+        if not lref_plugin.mt_PolEvt:
+            lref_plugin.set_map_tool_PolEvt()
+
+        if lref_plugin.mt_PolEvt:
+            # gefaktes self, da außerhalb des MapTools laufend
+            self = lref_plugin.mt_PolEvt
+            if self.SVS.REFERENCE_AND_DATA_LAYER_COMPLETE in self.system_vs:
+                data_or_show_lyr = qgis.core.QgsProject.instance().mapLayer(layer_id)
+                # case distinction: from which layer is this function called? dataLyr or showLyr?
+                if data_or_show_lyr == self.derived_settings.dataLyr:
+                    self.my_dialog.show()
+                    self.my_dialog.activateWindow()
+                    extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+                    self.tool_select_feature(fid, ['sn', 'rfl'], ['sn'], extent_mode)
+
+                    self.my_dialog.tbw_central.setCurrentIndex(1)
+
+                elif data_or_show_lyr == self.derived_settings.showLyr:
+                    if self.SVS.ALL_LAYERS_COMPLETE in self.system_vs:
+                        show_feature, error_msg = self.tool_get_show_feature(show_fid=fid)
+                        if show_feature:
+                            data_feature, error_msg = self.tool_get_data_feature(data_id=show_feature[self.stored_settings.showLyrBackReferenceFieldName])
+                            if data_feature:
+                                extent_mode = 'zoom' if (QtCore.Qt.ShiftModifier & QtWidgets.QApplication.keyboardModifiers()) else 'pan' if (QtCore.Qt.ControlModifier & QtWidgets.QApplication.keyboardModifiers()) else ''
+                                self.tool_select_feature(data_feature.id(), ['sn', 'rfl'], ['sn'], extent_mode)
+                                self.my_dialog.tbw_central.setCurrentIndex(1)
+                            else:
+                                self.dlg_append_log_message('WARNING', error_msg)
+                        else:
+                            self.dlg_append_log_message('WARNING', error_msg)
+                    else:
+                        self.dlg_append_log_message('INFO', MY_DICT.tr('reference_data_or_show_layer_missing'))
+
+                else:
+                    self.dlg_append_log_message('INFO', MY_DICT.tr('layer_not_registered', data_or_show_lyr.name()))
+            else:
+                self.dlg_append_log_message('INFO', MY_DICT.tr('reference_or_data_layer_missing'))
+        else:
+            qgis.utils.iface.messageBar().pushMessage(f"MapTool 'PoLEvt' in Plugin '{_plugin_name}' not loaded...", level=qgis.core.Qgis.Critical, duration=20)
+    else:
+        qgis.utils.iface.messageBar().pushMessage(f"Plugin '{_plugin_name}' missing...", level=qgis.core.Qgis.Critical, duration=20)
