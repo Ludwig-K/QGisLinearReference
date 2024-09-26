@@ -1,3 +1,2 @@
 from LinearReferencing.tools import MyDebugFunctions
-from LinearReferencing.tools import MyToolFunctions
-from LinearReferencing.tools import MyQtWidgets
+from LinearReferencing.tools import MyTools

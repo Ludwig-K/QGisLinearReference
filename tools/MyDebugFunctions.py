@@ -7,10 +7,10 @@
 * some Debug-Tool-Functions
 
 .. note::
-    * import to console from Path (LinearReferencing-plugin-folder in current QGis-Profile-Folder)
-    * or use: import LinearReferencing.tools.MyDebugFunctions
-    * or use f.e.: from LinearReferencing.tools.MyDebugFunctions import get_vlayer_metas
-    * and reload plugin to get the actual version...
+    * to import these methods for usage in python console:
+    * import LinearReferencing.tools.MyDebugFunctions
+    * from LinearReferencing.tools.MyDebugFunctions import get_vlayer_metas
+
 
 ********************************************************************
 
@@ -31,8 +31,8 @@ the Free Software Foundation; either version 2 of the License, or
 import pathlib, tempfile, os, sys, datetime
 
 import io
-
-from PyQt5.QtCore import QMetaType, QEvent
+import qgis
+from PyQt5.QtCore import QMetaType, QEvent, qDebug
 from PyQt5.QtWidgets import QApplication
 from qgis._core import QgsProject, QgsVectorLayer, QgsRasterLayer
 from qgis.core import QgsApplication, QgsWkbTypes
@@ -40,14 +40,30 @@ from qgis.core import QgsApplication, QgsWkbTypes
 
 def get_debug_pos(back_steps: int = 1) -> str:
     """returns debug-footprint (Filename + Line-Number) for Messages
-    :param back_steps: normally 1 ➜ get File/Line from Function, which called get_debug_pos
+    :param back_steps: normally 1 -> get File/Line from Function, which called get_debug_pos
     """
-    frame = sys._getframe(0) # current get_debug_pos function
+
+    frame = sys._getframe(0)  # current get_debug_pos function
 
     for bs in range(back_steps):
         frame = frame.f_back
 
     return f"{os.path.basename(os.path.realpath(frame.f_code.co_filename))} #{frame.f_lineno}"
+
+
+def get_debug_file_line(back_steps: int = 1) -> tuple:
+    """returns debug-footprint (Path + Line-Number)
+    :param back_steps: normally 1 -> get File/Line/Function from Function, which called get_debug_pos
+    """
+
+    frame = sys._getframe(0)  # current get_debug_pos function
+
+    for bs in range(back_steps):
+        frame = frame.f_back
+
+    return os.path.realpath(frame.f_code.co_filename), frame.f_lineno, frame.f_code.co_name
+
+
 
 
 def get_event_metas(e: QEvent) -> str:
@@ -113,10 +129,10 @@ def get_event_metas(e: QEvent) -> str:
     return_string += f"\n\tscreen-x/y: {e.globalPos().x()}/{e.globalPos().y()}"
     return_string += "\n\tDynamicProperties:"
 
-    # prop_name ➜ PyQt5.QtCore.QByteArray
+    # prop_name -> PyQt5.QtCore.QByteArray
     # but access to widget.property(...) is possible via string and original QByteArray
     for prop_name in widget.dynamicPropertyNames():
-        return_string += f"\n\t\t{str(prop_name, 'utf-8')} ➜ {widget.property(prop_name)}"
+        return_string += f"\n\t\t{str(prop_name, 'utf-8')} -> {widget.property(prop_name)}"
 
     return return_string
 
@@ -177,7 +193,7 @@ def get_vlayer_metas(vlayer: QgsVectorLayer) -> str:
     if isinstance(vlayer, QgsVectorLayer):
 
         # dataProvider.fields(): <class 'qgis._core.QgsFields'>
-        # ➜ only stored fields
+        # -> only stored fields
         provider_field_names = [field.name() for field in vlayer.dataProvider().fields()]
 
         # vlayer.fields: <class 'qgis._core.QgsFields'>
@@ -259,17 +275,17 @@ def get_vlayer_metas(vlayer: QgsVectorLayer) -> str:
 
         for action in a_lst:
             # qgis._core.QgsAction
-            # action.id() ➜ PyQt5.QtCore.QUuid https://doc.qt.io/qt-5/quuid.html
-            # action.type() ➜ qgis._core.QgsAction.ActionType
-            # action.icon() ➜  PyQt5.QtGui.QIcon
-            # action.name() ➜ in QGis as "Description" (mandatory)
-            # action.shortTitle() ➜ in QGis as "Short Name" (optional, if not set ➜ only icon)
-            # action.command() ➜ in QGis "Action Text", dependend from action.type(), f.e. Python-Code
+            # action.id() -> PyQt5.QtCore.QUuid https://doc.qt.io/qt-5/quuid.html
+            # action.type() -> qgis._core.QgsAction.ActionType
+            # action.icon() ->  PyQt5.QtGui.QIcon
+            # action.name() -> in QGis as "Description" (mandatory)
+            # action.shortTitle() -> in QGis as "Short Name" (optional, if not set -> only icon)
+            # action.command() -> in QGis "Action Text", dependend from action.type(), e.g. Python-Code
             return_string += f"\n\t\t-action\
             \n\t\t\t-id: '{action.id().toString()}'\
             \n\t\t\t-name: '{action.name()}'\
             \n\t\t\t-shortTitle: '{action.shortTitle()}' \
-            \n\t\t\t-type: {action.type()} ➜ '{action_type_dict[action.type()]}'\
+            \n\t\t\t-type: {action.type()} -> '{action_type_dict[action.type()]}'\
             \n\t\t\t-actionScopes: '{action.actionScopes()}'\
             \n\t\t\t-iconPath: '{action.iconPath()}'\
             \n\t\t\t-command:\n{action.command()}\
@@ -287,7 +303,7 @@ def stringify_object_functions(my_obj: object, prefix: str = '') -> str:
 
     Usage:
 
-    ``debug_print("cf", tools.MyDebugFunctions.stringify_object_functions(self.cf))``
+    ``debug_print("system_vs", tools.MyDebugFunctions.stringify_object_functions(self.system_vs))``
     :param my_obj: object for inspection, can be class too
     :param prefix: List-prefix for print-output, something like "\t- "
 
@@ -319,10 +335,10 @@ def log_string_to_file(log_string: str, log_file_name: str = "inspect.txt", temp
     :param log_file_name: Filename
     :param temp_sub_dir: Subdirectory in current temp-directory
     :param write_mode:
-    - prepend ➜ output prepended
-    - append ➜ output appended
-    - replace ➜ old content replaced by output
-    - single_file ➜ output respectively to new Log-File with randomized log_file_name (current timestamp included), existing log-files older 10 min are deleted
+    - prepend -> output prepended
+    - append -> output appended
+    - replace -> old content replaced by output
+    - single_file -> output respectively to new Log-File with randomized log_file_name (current timestamp included), existing log-files older 10 min are deleted
     :return: path to logfile
     """
     tempdir = tempfile.gettempdir()
@@ -347,7 +363,7 @@ def log_string_to_file(log_string: str, log_file_name: str = "inspect.txt", temp
                     pass
 
             d_now = datetime.datetime.now()
-            str_now = d_now.strftime('%Y-%d-%m_%H:%M:%S_')
+            str_now = d_now.strftime('%Y-%d-%m_%H:%M:%S')
             fd, name = tempfile.mkstemp(suffix=log_file_name, prefix=str_now, dir=log_dir, text=True)
             log_file_path = os.path.join(log_dir, name)
             try:
@@ -384,7 +400,7 @@ def stringify_object_props(my_obj: object, prefix: str = '') -> str:
 
     Usage:
 
-    ``debug_print("cf", tools.MyDebugFunctions.stringify_object_props(self.cf))``
+    ``debug_print("system_vs", tools.MyDebugFunctions.stringify_object_props(self.system_vs))``
     :param my_obj: object for inspection, can be class too
     :param prefix: List-prefix for print-output, something like "\t- "
     """
@@ -415,95 +431,159 @@ def print_to_string(*args, **kwargs) -> str:
     return contents
 
 
+# log function-usages, see debug_log
+# 0 => no log
+# 1 => log to console
+# 2 => log to console and file (helpfully for QGis-crash-debugging)
+debug_log_mode = 2
+# for debug_log_mode 2: Name for the Log-File, located in the plugin-directory, created if not existing
+log_file_name = 'LinearReferencing.log'
+debug_log_ctr = 0
+
+
+def debug_log(*args,**kwargs):
+    """quicky for debugging to console or file
+    outputs counter, function, file and line where the debug_log-function was called
+    uses global debug_log_mode, with this the debug-logs can be stopped for production-usage without the need to delete or comment the function calls
+    :param args: any number of debug-objects, appended stringified
+    :param kwargs: any number of keyword-objects, key prepended to __str__()-stringified output
+    """
+    global debug_log_ctr, debug_log_mode, log_file_name
+
+    if debug_log_mode > 0:
+        debug_log_ctr += 1
+
+        path = pathlib.Path(__file__)
+        plugin_folder = str(path.parent.parent.absolute())
+        frame = sys._getframe(0)
+        fc = 0
+        while frame:
+            if fc == 1:
+                # 0 => this function itself
+                # 1 => the function which called this function
+                file = os.path.realpath(frame.f_code.co_filename)
+                stripped_file = file.replace(plugin_folder, ".")
+                log_string = f"{debug_log_ctr}:\t{frame.f_code.co_name}\t{stripped_file}\t#{frame.f_lineno}"
+
+                if args:
+                    # multiple => each one in new line
+                    for log_obj in args:
+                        log_string += f"\n\t'{str(log_obj)}'"
+
+                if kwargs:
+                    for key in kwargs:
+                        log_string += f"\n\t'{str(key)}'\t'{str(kwargs[key])}'"
+
+                print(log_string)
+                if debug_log_mode == 2:
+                    # additionally write to log-file:
+                    log_file_path = os.path.join(plugin_folder, log_file_name)
+                    with open(log_file_path, "a+", encoding='utf-8') as f:
+                        # prepend with date-time and append to log-file
+                        d_now = datetime.datetime.now()
+                        str_now = d_now.strftime('%Y-%m-%d %H:%M:%S')
+                        f.write('\n' + str_now + '\n' + log_string)
+
+                return
+
+            frame = frame.f_back
+            fc += 1
+
+
 dbg_ctr = 0
 
-
-def debug_print(debug_title: str, *args, show_backtrace: bool = False, reset_ctr: bool = False, show_project_file: bool = False, write_mode: str = 'print', **kwargs) -> str:
-    """Write Debug-Messages to console or log-file (for debugging QGis-Crashes).
-
-    In case of file: Target-Dir is /temp/LinearReferencingLog respectively c:/users/xxx/AppData/Local/Temp/LinearReferencingLog
-
-    :param debug_title: title, dbg_ctr prepended
+def debug_print(*args, debug_title: str = None, show_backtrace: bool = True, output_to: str = 'console', **kwargs) -> str:
+    """Write Debug-Messages to console or qDebug (for debugging QGis-Crashes).
     :param args: any number of debug-objects, index prepended to __str__()-stringified output
-    :param kwargs: any number of debug-objects, keyword prepended to __str__()-stringified output
+    :param debug_title: optional title
     :param show_backtrace: includes backtrace
-    :param reset_ctr: resets the global dbg_ctr
-    :param write_mode:
-    - print ➜ output to console (default)
-    - return ➜ only return result-string, no output to console, f.e. use log_string_to_file afterwards
+    :param output_to:
+    - qDebug -> output to terminal qgis is started from (default)
+    - console -> output to console
+    - all other -> no output, only return result-string, e.g. for log_string_to_file
+    :param kwargs: any number of debug-objects, keyword prepended to __str__()-stringified output
     """
     global dbg_ctr
-
-    if reset_ctr:
-        dbg_ctr = 0
-
     dbg_ctr += 1
 
-    if not isinstance(debug_title, str):
-        # tuple ➜ unchangeable
-        args = list(args)
-        args.append(debug_title)
-        debug_title = 'no title'
+    path = pathlib.Path(__file__)
+    # <class 'pathlib.PosixPath'>
+    plugin_folder = str(path.parent.parent.absolute())
 
-    # header: counter + timestamp  + title
-    # %d.%m.%Y
-    header_line = f"#{dbg_ctr} {datetime.datetime.now().strftime('%H:%M:%S')} {debug_title}"
-
-    frame = sys._getframe(0)
 
     backtrace = []
+    # get maximum string-length for f-string-adjusted formatting
+    max_length_fn = 0
+    max_length_fi = 0
+
+    frame = sys._getframe(0)
     while frame:
-        backtrace.append(
-            {"file": os.path.realpath(frame.f_code.co_filename), "function": frame.f_code.co_name,
-             "lineno": frame.f_lineno})
+        file = os.path.realpath(frame.f_code.co_filename)
+        function = frame.f_code.co_name
+        lineno = frame.f_lineno
+
+        stripped_file = file.replace(plugin_folder, ".")
+        max_length_fi = max(max_length_fi, len(stripped_file))
+        max_length_fn = max(max_length_fn, len(function))
+
+        currentrace = {"file": file, "function": function, "lineno": lineno}
+        backtrace.append(currentrace)
         frame = frame.f_back
 
-    # backtrace[0] ➜  debug_print-function itself
-    # backtrace[1] ➜ function which called debug_print
+
+
+    # backtrace[0] ->  debug_print-function itself
+    # backtrace[1] -> function which called debug_print
     last_trace = backtrace[1]
+    stripped_file = last_trace['file'].replace(plugin_folder, ".")
 
-    plugin_folder = os.path.realpath(QgsApplication.qgisSettingsDirPath() + '/python/plugins')
+    if not debug_title:
+        debug_title = last_trace['function']
 
-    stripped_file = last_trace['file'].replace(plugin_folder, "...")
-    header_line += f" '{stripped_file}'  # {last_trace['lineno']}"
+    max_length_fn = max(max_length_fn,len(debug_title))
+    max_length_fn += 8
 
-    if show_project_file:
-        if QgsProject.instance().fileName():
-            header_line += f"     Project: {QgsProject.instance().fileName()}"
 
-    log_string = f"{header_line}"
+    log_string = "--------------------------------------------------------------------------------------------------------------"
+    log_string += f"\n{dbg_ctr}:\t{datetime.datetime.now().strftime('%H:%M:%S')}\t{debug_title:<{max_length_fn}}\t{stripped_file:<{max_length_fi}}\t#{last_trace['lineno']}"
 
     if args:
-        args_string = 'args:'
         i = 0
         for arg in args:
             i += 1
-            args_string += '\n\t\t' + str(i) + '\t' + str(arg)
+            log_string += '\n\t' + str(i) + '\t' + str(arg)
 
-        log_string += f"\n\t{args_string}"
 
     if kwargs:
-        kwargs_string = 'kwargs:'
         for key in kwargs:
-            kwargs_string += '\n\t\t' + str(key) + '\t' + str(kwargs[key])
+            log_string += '\n\t' + str(key) + '\t' + str(kwargs[key])
 
-        log_string += f"\n\t{kwargs_string}"
 
     if show_backtrace:
-        backtrace_part = f"Backtrace(reverse):"
+        backtrace_part = f"Backtrace:"
         backtrace = list(reversed(backtrace))
         # the debug_print-call itself
         backtrace.pop()
         backtrace_idx = 0
+
         for trace_step in backtrace:
             backtrace_idx += 1
             file, function, lineno = map(trace_step.get, ('file', 'function', 'lineno'))
-            stripped_file = file.replace(plugin_folder, "...")
-            backtrace_part += f"\n\t\t\t{backtrace_idx}\t{function}(...)\t{stripped_file} #{lineno}"
+            function += '(...)'
+            stripped_file = file.replace(plugin_folder, ".")
+            backtrace_part += f"\n\t\t{backtrace_idx}\t{function:<{max_length_fn}}\t{stripped_file:<{max_length_fi}}\t#{lineno}"
 
-        log_string += f"\n\n\t\t{backtrace_part}"
+        log_string += f"\n\n\t{backtrace_part}"
 
-    if write_mode == 'print':
+
+    if output_to == 'qDebug':
+        # qDebug appears in the console window qgis is started from
+        # Note to encode: qDebug-strings are expected to be ascii
+        # without encode:
+        # UnicodeEncodeError: 'ascii' codec can't encode character '\xe0' in position 4: ordinal not in range(128)
+        qDebug(log_string.encode('utf-8'))
+    elif output_to == 'console':
+        # print appears in Python-Console
         print(log_string)
 
     return log_string
