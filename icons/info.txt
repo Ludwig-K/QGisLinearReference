@@ -1,0 +1,44 @@
+Icons for the LinearReferencing-Plugin bundled into one resource.
+1. for simplicity: all graphics (svg, png...) into one directory
+2. create XML-file (here: resources.qrc) in that directory with following syntax:
+
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="icons">
+        <file>account-question-outline.svg</file>
+        <file>arrow-expand-all.svg</file>
+        ...
+    </qresource>
+</RCC>
+
+if necessary use aliases and paths:
+        ...
+        <file alias="smiley.png">../icons/smiley.png</file>
+        ...
+
+(Tip:
+copy all file-names/paths in the icons-directory with file-explorer-apps like Double Commander/Total Commander/Altap Salamander/Norton Commander... to clipboard and paste them to resources.qrc)
+
+3. Start terminal and switch to the plugin-icons-directory (note: regard the *currently active* user-profile, see QGis > Settings > User Profile)
+    cd "/home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/icons"
+    rsp.
+    cd "c:\Users\ludwig.kniprath\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\LinearReferencing\icons"
+
+4. create resource-file
+Linux:
+    pyrcc5 resources.qrc -o resources.py
+Windows:
+    "c:\Program Files\QGIS 3.22.3\apps\Python39\Scripts\pyrcc5.exe" resources.qrc -o resources.py
+    seit QGis-Update => Fehlermeldungen "ModuleNotFoundError", Workaround: 
+    "c:\Users\ludwig.kniprath\AppData\Local\Programs\Python\Python39\Scripts\pyrcc5.exe" resources.qrc -o resources.py
+
+
+5. Usage in Python:
+Instead of including the original graphics with paths just include the compiled resources.py:
+    from LinearReferencing.icons import resources
+
+and use the prefix defined in the qrc-file <qresource prefix="icons"> to access the compiled resource:
+    self.pb_open_ref_form.setIcon(QtGui.QIcon(':icons/mActionIdentify.svg'))
+
+
+There is a tool under \LinearReferencing\tools\MiscTools.py which will scan the usage and deletes the not used grafics
