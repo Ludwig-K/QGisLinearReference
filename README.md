@@ -57,11 +57,11 @@ Original purpose:
 - not tested on macOS
 - please report bugs or ideas for missing features 
 - or translation-errors :-)
-- or support the plugin-usability for the community with pylupdate5/lsrelease-translations to other languages then english/german
+
 
 
 ## More Instructions: ##
-[docs/index.html](https://htmlpreview.github.io/?https://github.com/Ludwig-K/QGisLinearReference/blob/main/docs/index.html)
+[docs/index.en.html](https://htmlpreview.github.io/?https://github.com/Ludwig-K/QGisLinearReference/blob/main/docs/index.en.html)
 
 
 ## Contribute ##
