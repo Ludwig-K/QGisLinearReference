@@ -25,11 +25,30 @@ the Free Software Foundation; either version 2 of the License, or
 
 import os, sys, pathlib, re, sqlite3
 
+# scan all svg-icons in directory \QGIS\QGIS3\profiles\default\python\plugins\LinearReferencing\icons\
+# /usr/bin/python3 /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/tools/MiscTools.py scan_icon_usages
+# /usr/bin/python3 /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/tools/MiscTools.py scan_icon_usages delete_unfound
+
+# scan all images in directory \plugins\LinearReferencing\docs\images\
+# /usr/bin/python3 /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/tools/MiscTools.py scan_html_image_usages
+# /usr/bin/python3 /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/tools/MiscTools.py scan_html_image_usages delete_unfound
+
+# find all usages of MY_DICT
+# /usr/bin/python3 /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/tools/MiscTools.py scan_dict_usages
+# /usr/bin/python3 /home/ludwig/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LinearReferencing/tools/MiscTools.py scan_dict_usages delete_missing
 
 if __name__ == "__main__":
     on_load_task = None
-    if len(sys.argv) > 1:
+    on_load_param_1 = None
+    # sys.argv => path of current script
+    if len(sys.argv) == 2:
         on_load_task = sys.argv[1]
+
+    if len(sys.argv) == 3:
+        on_load_task = sys.argv[1]
+        on_load_param_1 = sys.argv[2]
+
+    print(on_load_task,on_load_param_1)
 
     if on_load_task == "scan_icon_usages":
         # scans all svg-icons in directory \QGIS\QGIS3\profiles\default\python\plugins\LinearReferencing\icons\
@@ -38,9 +57,6 @@ if __name__ == "__main__":
         # configured by an XML-File profiles\default\python\plugins\LinearReferencing\icons\resources.qrc
         # they are used inside python and identified below via QtGui.QIcon(':icons/linear_referencing_point.svg')
         # resources.qrc has to be adapted afterward (delete lines with deleted svgs) and the resource-file has to be pyrcc5-re-generated
-        delete_unfound = False
-        if len(sys.argv) > 2:
-            delete_unfound = sys.argv[2] == '1'
 
 
         # current executed script:
@@ -100,11 +116,11 @@ if __name__ == "__main__":
                 found_result += f"{trunc_abs_path} -> {rel_path} #{line}\n"
             else:
                 not_found_result += f"{trunc_abs_path}"
-                if delete_unfound:
+                if on_load_param_1 == 'delete_unfound':
                     if os.path.isfile(abs_path):
                         try:
-                             os.remove(abs_path)
-                             not_found_result += " ... deleted"
+                            os.remove(abs_path)
+                            not_found_result += " ... deleted"
                         except:
                             not_found_result += "... could not be deleted"
 
@@ -121,10 +137,6 @@ if __name__ == "__main__":
         # scans all images in directory \plugins\LinearReferencing\docs\images\
         # find usages in the two html-files index.en.html rsp. index.de.html
         # optionally deletes not used images
-        delete_unfound = False
-        if len(sys.argv) > 2:
-            delete_unfound = sys.argv[2] == '1'
-
 
         # current executed script:
         path = pathlib.Path(__file__)
@@ -187,11 +199,11 @@ if __name__ == "__main__":
                 found_result += f"{trunc_abs_path} -> {rel_path} #{line}\n"
             else:
                 not_found_result += f"{trunc_abs_path}"
-                if delete_unfound:
+                if on_load_param_1 == 'delete_unfound':
                     if os.path.isfile(abs_path):
                         try:
-                             os.remove(abs_path)
-                             not_found_result += " ... deleted"
+                            os.remove(abs_path)
+                            not_found_result += " ... deleted"
                         except:
                             not_found_result += "... could not be deleted"
 
@@ -210,22 +222,8 @@ if __name__ == "__main__":
         sq3_db_file_name = 'SQLiteDict.sqlite3'
         sq3_table_name = 'snip_snippets'
 
-        # special snippets, directly assigned to FVS
+        # special snippets
         skip_keys = [
-            'DATA_FEATURE_EXISTS',
-            'REFERENCE_ID_VALID',
-            'REFERENCE_FEATURE_EXISTS',
-            'REFERENCE_GEOMETRY_EXIST',
-            'REFERENCE_GEOMETRY_VALID',
-            'STATIONING_NUMERIC',
-            'STATIONING_INSIDE_RANGE',
-            'STATIONING_FROM_NUMERIC',
-            'STATIONING_TO_NUMERIC',
-            'STATIONING_FROM_INSIDE_RANGE',
-            'STATIONING_TO_INSIDE_RANGE',
-            'STATIONING_FROM_LTEQ_TO',
-            'OFFSET_NUMERIC',
-            'fvs.first_fail_flag'
         ]
 
         # current executed script:
@@ -236,52 +234,65 @@ if __name__ == "__main__":
         # recursively find scan-targets: all python-files in parent.parent
         scan_files = [str(file) for file in parent.rglob('*.py')]
 
-        sq3_db_path = os.path.join(parent, 'i18n',sq3_db_file_name)
+        print("scanned files:")
+        for fc, file in enumerate(scan_files):
+            print(f"   #{fc} {file}")
 
-        uri = f'file:{sq3_db_path}?mode=ro'
+        sq3_db_path = os.path.join(parent, 'i18n',sq3_db_file_name)
+        # ?mode=ro => read only
+        uri = f'file:{sq3_db_path}'
 
         conn_sq3 = sqlite3.connect(uri, uri=True)
         cur_sq3 = conn_sq3.cursor()
 
 
-        query_all_sq3 = f"select snip_key,  concat(\"MY_DICT.tr('\", snip_key) as search_string  from 'snip_snippets' order by snip_id asc;"
+        query_all_sq3 = f"select snip_id, snip_key from 'snip_snippets' order by snip_id asc;"
 
         sqlite_result = cur_sq3.execute(query_all_sq3)
 
         records = sqlite_result.fetchall()
         hit_list = {}
         for row in records:
-            snip_key = row[0]
+            snip_id =  row[0]
+            snip_key = row[1]
 
             if snip_key not in skip_keys:
 
-                search_string = row[1]
+                search_string_single_quote = f"'{snip_key}'"
+                search_string_double_quote = f'"{snip_key}"'
 
                 hit_list[snip_key] = []
 
                 for c_path in scan_files:
                     with open(c_path, 'r') as fp:
-
-
-                        if search_string in fp.read():
+                        file_contents = fp.read()
+                        if search_string_single_quote in file_contents or search_string_double_quote in file_contents:
                             fp.seek(0)
                             for l_no, line in enumerate(fp):
-                                if search_string in line:
+                                if search_string_single_quote in line or search_string_double_quote in line:
                                     # print(c_path, scan_key,l_no,line )
                                     hit_list[snip_key].append([c_path,l_no])
 
-
+        found_result = "Found snippets:\n"
+        missed_usages = "Missing usage:\n"
         for snip_key in hit_list:
             if len(hit_list[snip_key]):
                 abs_path = str(hit_list[snip_key][0][0])
                 rel_path = abs_path.replace(str(parent),'')
 
                 line = hit_list[snip_key][0][1]
-                print(f"{snip_key} -> {rel_path} #{line}")
+                found_result += f"\n   {snip_key} -> {rel_path} #{line}"
             else:
-                print(f"{snip_key} -> nicht gefunden!")
+                missed_usages += f"\n   {snip_key}"
+                if on_load_param_1 == "delete_missing":
+                    delete_missing_sq3 = f"delete from 'snip_snippets' where snip_key = \"{snip_key}\";"
+                    sqlite_result = cur_sq3.execute(delete_missing_sq3)
 
-
+        print(found_result)
+        print(missed_usages)
+        if on_load_param_1 == "delete_missing":
+            print("records deleted...")
+            conn_sq3.commit()
 
 
 
