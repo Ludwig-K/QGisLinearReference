@@ -23,14 +23,15 @@ the Free Software Foundation; either version 2 of the License, or
 """
 # Rev. 2024-01-04
 
-from PyQt5 import QtCore, QtWidgets
-import os, sys, pathlib, re
+from PyQt5 import QtCore
+import os
+
+# raises exception if no QGis-sqlite3, possibly on Macs...
 import sqlite3
-import qgis
 
 class SQLiteDict():
     """
-    replacement for QtCore.QCoreApplication.translate(...), which is nearly impossible to maintain and has problems with markups
+    replacement for QtCore.QCoreApplication.translate(...), which is hard to maintain and has problems with markups
     used for all kinds of Qt-GUI-Strings e.g. ToolTips, Labels, messages...
     translations are supported via lcid
     Uses a single SQlite-DB/Table instead of previous storage in python-dicitionaries
@@ -58,6 +59,7 @@ class SQLiteDict():
             # raises sqlite3.OperationalError: unable to open database file
             # with path only a new database is created somewhere in Nirvana (bad experience...)
             uri = f'file:{sq3_db_path}?mode=ro'
+
             self.conn_sq3 = sqlite3.connect(uri,uri=True)
             self.cur_sq3 = self.conn_sq3.cursor()
 
@@ -128,15 +130,19 @@ class SQLiteDict():
         """
         returns a translated snippet
         variant *without query* with pre-queried self.tr_dict
-        pros: ca. 75 times faster
+        pros: faster
         cons: the translation-data is queried once and updates require a refresh of self.tr_dict
         The function raises no exception, but returns
             "?[{snip_key}]?" if the key is not found
             rsp. an error-message, if something goes wrong
-        :param snip_key: key, for which the function searches in the snippet-dictionoary
-        :param embeds: any number of arguments, which are stringified and embedded into the template via format-like wildcards {0} {1}...
-        :param kwembeds: any number of keyword-arguments, which are stringified and embedded into the template via wildcard {key}...
-        :returns: translated content with replacements
+
+        Args:
+            snip_key (str): key, for which the function searches in the snippet-dictionoary
+            embeds (list): any number of arguments, which are stringified and embedded into the template via format-like wildcards {0} {1}...
+            kwembeds (dict): any number of keyword-arguments, which are stringified and embedded into the template via wildcard {key}...
+
+        Returns:
+            str: translated content with replacements
         """
         # Rev. 2024-01-08
         snip_content = self.tr_dict.get(snip_key, f'?[{snip_key}]?')
@@ -154,10 +160,13 @@ class SQLiteDict():
             rsp. an error-message, if something goes wrong
 
 
-        :param snip_key: key, for which the function searches in the snippet-dictionoary
-        :param embeds: any number of arguments, which are stringified and embedded into the template via format-like wildcards {0} {1}...
-        :param kwembeds: any number of keyword-arguments, which are stringified and embedded into the template via wildcard {key}...
-        :returns: translated content with replacements
+        Args:
+            snip_key (str): key, for which the function searches in the snippet-dictionoary
+            embeds (list): any number of arguments, which are stringified and embedded into the template via format-like wildcards {0} {1}...
+            kwembeds (dict): any number of keyword-arguments, which are stringified and embedded into the template via wildcard {key}...
+
+        Returns:
+            str: translated content with replacements
         """
         # Rev. 2024-01-04
         snip_content = f'?[{snip_key}]?'
@@ -180,19 +189,23 @@ class SQLiteDict():
 
 
 
-    def embed_wildcards(self,snip_content,embeds:list,kwembeds:dict)->str:
+    def embed_wildcards(self,snip_content:str,embeds:list,kwembeds:dict)->str:
         """replace the optional format-like embeds,
         no error, if there are more/less/not-found embeds than wildcards
         each item in embeds will replace an incremented wildcard ala {0} {1}...
         each key-value-pair in kwembeds will replace a wildcard ala '{key}'...
-        :param snip_content: queried snippet-content
-        :param embeds: any number of arguments, which are stringified and embedded into the template via format-like wildcards {0} {1}...
-        :param kwembeds: any number of keyword-arguments, which are stringified and embedded into the template via wildcard {key}...
-        :returns: translated content with replacements
+
+        Allways performed on runtime, because the embeds/kwembeds will vary
+
+        Args:
+            snip_content (str): original snippet with wildcards
+            embeds (list): any number of arguments, which are stringified and embedded into the template via format-like wildcards {0} {1}...
+            kwembeds (dict): any number of keyword-arguments, which are stringified and embedded into the template via wildcard {key}...
+
+        Returns:
+            str: snip_content with replacements
         """
-        #
-        #
-        #
+        # Rev. 2026-01-13
         ec = 0
         for e in embeds:
             s = '{' + str(ec) + '}'
