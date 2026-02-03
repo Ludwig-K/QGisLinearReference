@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="24"
+   height="24"
+   viewBox="0 0 24 24"
+   version="1.1"
+   id="svg5"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   sodipodi:docname="select_lol_feature.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview7"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:document-units="px"
+     showgrid="false"
+     inkscape:zoom="1.625"
+     inkscape:cx="56"
+     inkscape:cy="164.92308"
+     inkscape:window-width="1920"
+     inkscape:window-height="1048"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1"
+     inkscape:showpageshadow="2"
+     inkscape:deskcolor="#d1d1d1" />
+  <defs
+     id="defs2">
+    <linearGradient
+       id="linearGradient3056"
+       inkscape:swatch="solid">
+      <stop
+         style="stop-color:#000000;stop-opacity:1;"
+         offset="0"
+         id="stop3054" />
+    </linearGradient>
+    <linearGradient
+       id="linearGradient974"
+       inkscape:swatch="solid">
+      <stop
+         style="stop-color:#00ff00;stop-opacity:1;"
+         offset="0"
+         id="stop972" />
+    </linearGradient>
+  </defs>
+  <g
+     inkscape:label="Ebene 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <g
+       id="g969"
+       transform="translate(-0.42499284,-0.42495436)">
+      <path
+         d="M 1.4798758,1.4798 H 22.520123 V 20.52 H 1.4798758 Z"
+         fill="#e5e5e5"
+         stroke="#424242"
+         stroke-dasharray="1.9195, 0.959752"
+         stroke-width="0.959752"
+         id="path763" />
+      <g
+         id="g459"
+         transform="matrix(0.67761721,0,0,0.67761721,1.719616,1.8033666)">
+        <path
+           style="fill:none;stroke:#ffaa00;stroke-width:5;stroke-dasharray:none"
+           d="M 2.7321821,21.360697 21.360697,2.4010085"
+           id="path1"
+           sodipodi:nodetypes="cc" />
+        <rect
+           style="fill:#ffffff;fill-opacity:1;stroke:#1fa208;stroke-width:2.5;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
+           id="rect2205"
+           width="5.5"
+           height="5.5"
+           x="2.0519576"
+           y="16.36834"
+           inkscape:transform-center-x="0.061167552"
+           inkscape:transform-center-y="-0.37035563" />
+        <rect
+           style="fill:#ffffff;fill-opacity:1;stroke:#ff0000;stroke-width:2.5;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
+           id="rect2205-3"
+           width="5.5"
+           height="5.5"
+           x="16.479139"
+           y="1.9931223"
+           inkscape:transform-center-x="0.061167491"
+           inkscape:transform-center-y="-0.37035574" />
+      </g>
+      <path
+         d="M 22.652743,15.6955 9.896279,8.7164 15.373832,22.3178 17.554719,18.7866 21.866878,23.5 23.5,21.9087 19.091401,17.2404 22.652744,15.6955 Z"
+         fill="#ffffff"
+         fill-rule="evenodd"
+         stroke="#000000"
+         stroke-linejoin="round"
+         stroke-width="0.7"
+         id="path767"
+         style="stroke-linecap:round" />
+    </g>
+  </g>
+</svg>

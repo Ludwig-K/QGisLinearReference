@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="24"
+   height="24"
+   viewBox="0 0 24 24"
+   version="1.1"
+   id="svg5"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   sodipodi:docname="select_pol_feature.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview7"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:document-units="px"
+     showgrid="false"
+     inkscape:zoom="4.5961941"
+     inkscape:cx="28.501843"
+     inkscape:cy="70.710678"
+     inkscape:window-width="1920"
+     inkscape:window-height="1048"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1"
+     inkscape:showpageshadow="2"
+     inkscape:deskcolor="#d1d1d1" />
+  <defs
+     id="defs2">
+    <linearGradient
+       id="linearGradient3056"
+       inkscape:swatch="solid">
+      <stop
+         style="stop-color:#000000;stop-opacity:1;"
+         offset="0"
+         id="stop3054" />
+    </linearGradient>
+    <linearGradient
+       id="linearGradient974"
+       inkscape:swatch="solid">
+      <stop
+         style="stop-color:#00ff00;stop-opacity:1;"
+         offset="0"
+         id="stop972" />
+    </linearGradient>
+  </defs>
+  <g
+     inkscape:label="Ebene 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <g
+       id="g1178"
+       transform="translate(-0.42499284,-0.42495436)">
+      <path
+         d="M 1.4798758,1.4798 H 22.520123 V 20.52 H 1.4798758 Z"
+         fill="#e5e5e5"
+         stroke="#424242"
+         stroke-dasharray="1.9195, 0.959752"
+         stroke-width="0.959752"
+         id="path763" />
+      <rect
+         style="fill:#ffffff;fill-opacity:1;stroke:#1fa208;stroke-width:2.64438;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
+         id="rect2205"
+         width="6.9297724"
+         height="6.74365"
+         x="4.1961951"
+         y="3.8835983"
+         inkscape:transform-center-x="0.077070468"
+         inkscape:transform-center-y="-0.45409583" />
+      <path
+         d="M 22.652743,15.6955 9.896279,8.7164 15.373832,22.3178 17.554719,18.7866 21.866878,23.5 23.5,21.9087 19.091401,17.2404 22.652744,15.6955 Z"
+         fill="#ffffff"
+         fill-rule="evenodd"
+         stroke="#000000"
+         stroke-linejoin="round"
+         stroke-width="0.7"
+         id="path767"
+         style="stroke-linecap:round" />
+    </g>
+  </g>
+</svg>
