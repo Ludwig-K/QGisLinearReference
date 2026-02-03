@@ -1,2 +1,4 @@
 from LinearReferencing.dialogs.LolDialog import LolDialog
 from LinearReferencing.dialogs.PolDialog import PolDialog
+from LinearReferencing.dialogs.PolCreateDataLayerDialog import PolCreateDataLayerDialog
+from LinearReferencing.dialogs.LolCreateDataLayerDialog import LolCreateDataLayerDialog
