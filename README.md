@@ -1,7 +1,7 @@
 # QGisLinearReference #
 
 QGis-Python-Plugin for linear referenced data
-- "PoL" => "Point-on-Line" 
+- "PoL" => "Point-on-Line"
 - "LoL" => "Line-on-Line"
 
 Original purpose:
@@ -13,31 +13,31 @@ Original purpose:
 - geometry-less "layers" in the current project
 - can be created with support of this plugin (GeoPackage)
 - or used, if they allready exist as layer in the current project
-  - GeoPackage, PostGIS 
+  - GeoPackage, PostGIS
   - possible, tested, **not** recommended: Excel, LibreOffice...
 - should be editable (insert/update/delete-privileges required, otherwise only viewer-functionality)
-- need a 
+- need a
   - unique-id-field (usually the primary-key)
   - reference-field to join the reference-layer
   - measure-fields (one for PoL, two for LoL, numeric type)
   - for LoL: offset-field (numeric) for the parallel offset of the segments from the referenced line (positive: left side, negative: right side).
-  
+
 ### "Reference-Layer" ###
 - vector-layer (GeoPackage, PostGIS, Shape...)
 - type linestring/linestringM/linestringZ/linestringMZ... (M-values not taken into account)
-  - hint: Shape-files don't differentiate single- and multipart-geometries, therefore also the linestring-xx-multi-versions are possible, but not tested and results not predictable 
+  - hint: Shape-files don't differentiate single- and multipart-geometries, therefore also the linestring-xx-multi-versions are possible, but not tested and results not predictable
 - unique-ID-field (type integer or string, usually the primary-key) for join the data-layer
 
 ### "Show-Layer" ###
 - virtual layer
-- calculate the point/segment-geometries 
-- combines data- and reference-layer and calculates the PoL/LoL-Features with expressions "ST_Line_Interpolate_Point(...)" or "ST_Line_Substring(...)" 
+- calculate the point/segment-geometries
+- combines data- and reference-layer and calculates the PoL/LoL-Features with expressions "ST_Line_Interpolate_Point(...)" or "ST_Line_Substring(...)"
 - data/reference-layer can come from totally different sources (f.e. join Excel-Table with Shape-File)
 - plugin-created with the minimal necessary fields (ID, reference-ID, measures, offset), all other fields from data- and reference-layer are joined
 
 ## The plugin can be used in different ways: ##
 ### Measure ###
-- Just show measures for the current cursor-Position on the appropriate feature of the "reference-layer" 
+- Just show measures for the current cursor-Position on the appropriate feature of the "reference-layer"
 - "Mouse-Press" to set temporary markers ("point-on-line" => one green marker, one measure, "line-on-line" two markers green/red, two measures)
 ### Create layer ###
 - create data-layer for storing features with the relevant reference data (measure, measure-from, measure-to, offset, reference-id)
@@ -49,19 +49,20 @@ Original purpose:
 
 ## Addendum ##
 - The plugin has been developed under the latest versions since 2023, currently
-  - QGIS 3.38.4 'Grenoble'
+  - QGIS 3.44.6 'Solothurn'
   - QGIS 3.34.10 'Prizren' (LTR)
   - Windows (10 + 11)
   - Linux (Ubuntu/Mint 21.2)
 - not tested (but should run) with older QGis-3-Versions
 - not tested on macOS
-- please report bugs or ideas for missing features 
+- not tested for Qt-6
+- please report bugs or ideas for missing features
 - or translation-errors :-)
 
 
 
 ## More Instructions: ##
-[docs/index.en.html](https://htmlpreview.github.io/?https://github.com/Ludwig-K/QGisLinearReference/blob/main/docs/index.en.html)
+[index.en.html](http://kni-online.de/LinearReferencing/Release%202.1.0/index.en.html)
 
 
 ## Contribute ##

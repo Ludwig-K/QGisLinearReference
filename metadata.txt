@@ -1,6 +1,6 @@
 [general]
 name=LinearReferencing
-version=2.0.0
+version=2.1.0
 category=Plugins
 icon=icons/linear_referencing.svg
 experimental=False
@@ -22,6 +22,16 @@ tracker=https://github.com/Ludwig-K/QGisLinearReference/issues
 repository=https://github.com/Ludwig-K/QGisLinearReference
 
 changelog=
+  <p>2.1.0 (2026-02-03)
+  - Feature-Selection and PostProcessing-Selection as TreeView
+  - enhanced PostProcessing with compare-layer
+  - enhanced GUI
+  - customizable Plugin-Snapping-Settings
+  - updated documentation, new location and context-sensitive
+  - Fix bugs
+  <p>2.0.1 (2024-11-01)
+  - no local documentation (reduces download-size, but call-for-help requires an internet connection)
+  - Fix modspatialite-bug for QGis-macOS-users (see https://github.com/qgis/QGIS/issues/59283)
   <p>2.0.0 (2024-09-01)
   - Compatibility with latest QGis-Versions 3.38.4 'Grenoble' rsp. QGIS 3.34.10 'Prizren' (LTR)
   - Relative stationing (value-range 0...1)

@@ -24,15 +24,14 @@ the Free Software Foundation; either version 2 of the License, or
 
 
 from qgis._gui import QgisInterface
-from LinearReferencing.tools.MyDebugFunctions import debug_print
 
+from .LinearReference import LinearReference
 
 def classFactory(iface:QgisInterface):
     """reimplemented function for initialization of the plugin
     :param iface:
     """
-    
-    from .LinearReference import LinearReference
+    # Rev. 2026-01-13
     return LinearReference(iface)
 
 
